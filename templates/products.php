@@ -49,6 +49,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 include 'header.php';
 $categories = $pdo->query("SELECT * FROM categories ORDER BY name")->fetchAll();
+$selectedCategory = intval($_GET['category'] ?? 0);
 ?>
 
 <?php if (isset($_GET['success'])): ?>
@@ -61,19 +62,44 @@ $categories = $pdo->query("SELECT * FROM categories ORDER BY name")->fetchAll();
 
 <?php if ($action === 'index'): ?>
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0"><i class="bi bi-box-seam me-2"></i>Products</h4>
-    <a href="?page=products&action=create" class="btn btn-primary"><i class="bi bi-plus-lg me-2"></i>Add Product</a>
+    <h4 class="mb-0"><i class="bi bi-box-seam me-2"></i>Stocks</h4>
+    <div class="d-flex gap-2">
+        <a href="?page=categories" class="btn btn-outline-secondary"><i class="bi bi-tags me-2"></i>Manage Categories</a>
+        <a href="?page=products&action=create" class="btn btn-primary"><i class="bi bi-plus-lg me-2"></i>Add Stock Item</a>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <span class="fw-semibold me-2">Categories:</span>
+            <a href="?page=products" class="btn btn-sm <?= $selectedCategory === 0 ? 'btn-primary' : 'btn-outline-primary' ?>">All</a>
+            <?php foreach ($categories as $category): ?>
+            <a href="?page=products&category=<?= $category['id'] ?>" class="btn btn-sm <?= $selectedCategory === (int) $category['id'] ? 'btn-primary' : 'btn-outline-primary' ?>">
+                <?= htmlspecialchars($category['name']) ?>
+            </a>
+            <?php endforeach; ?>
+        </div>
+        <small class="text-muted d-block mt-2">Categories are available here to make stock browsing and billing faster.</small>
+    </div>
 </div>
 
 <div class="card">
     <div class="card-body">
         <table class="table table-striped table-hover">
             <thead class="table-dark">
-                <tr><th>SKU</th><th>Product Name</th><th>Category</th><th class="text-end">Cost</th><th class="text-end">Retail</th><th class="text-end">Wholesale</th><th class="text-center">Stock</th><th>Status</th><th class="text-end">Actions</th></tr>
+                <tr><th>SKU</th><th>Stock Item</th><th>Category</th><th class="text-end">Cost</th><th class="text-end">Retail</th><th class="text-end">Event</th><th class="text-center">Stock</th><th>Status</th><th class="text-end">Actions</th></tr>
             </thead>
             <tbody>
                 <?php
-                $products = $pdo->query("SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id ORDER BY p.name")->fetchAll();
+                $productSql = "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id";
+                if ($selectedCategory > 0) {
+                    $stmt = $pdo->prepare($productSql . " WHERE p.category_id = ? ORDER BY p.name");
+                    $stmt->execute([$selectedCategory]);
+                    $products = $stmt->fetchAll();
+                } else {
+                    $products = $pdo->query($productSql . " ORDER BY p.name")->fetchAll();
+                }
                 foreach ($products as $p):
                 $stockClass = $p['stock_quantity'] <= 0 ? 'bg-danger' : ($p['stock_quantity'] <= $p['min_stock_level'] ? 'bg-warning text-dark' : 'bg-success');
                 ?>
@@ -110,7 +136,7 @@ function deleteProduct(id, name) {
 
 <?php elseif ($action === 'create'): ?>
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0"><i class="bi bi-plus-circle me-2"></i>Add New Product</h4>
+    <h4 class="mb-0"><i class="bi bi-plus-circle me-2"></i>Add New Stock Item</h4>
     <a href="?page=products" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
 </div>
 
@@ -123,7 +149,7 @@ function deleteProduct(id, name) {
                     <input type="text" name="sku" class="form-control" required placeholder="e.g. FW-001">
                 </div>
                 <div class="col-md-6 mb-3">
-                    <label class="form-label">Product Name <span class="text-danger">*</span></label>
+                    <label class="form-label">Stock Item Name <span class="text-danger">*</span></label>
                     <input type="text" name="name" class="form-control" required placeholder="e.g. Sparkler 10cm">
                 </div>
             </div>
@@ -150,7 +176,7 @@ function deleteProduct(id, name) {
                     <input type="number" name="selling_price" class="form-control" step="0.01" min="0.01" required>
                 </div>
                 <div class="col-md-4 mb-3">
-                    <label class="form-label">Wholesale Price (<?= $currency ?>)</label>
+                    <label class="form-label">Event Price (<?= $currency ?>)</label>
                     <input type="number" name="wholesale_price" class="form-control" step="0.01" min="0">
                 </div>
             </div>
@@ -165,7 +191,7 @@ function deleteProduct(id, name) {
                 </div>
             </div>
             <div class="d-flex gap-2">
-                <button type="submit" class="btn btn-primary"><i class="bi bi-check-lg me-2"></i>Save Product</button>
+                <button type="submit" class="btn btn-primary"><i class="bi bi-check-lg me-2"></i>Save Stock Item</button>
                 <a href="?page=products" class="btn btn-secondary">Cancel</a>
             </div>
         </form>
@@ -182,7 +208,7 @@ if (!$product) { echo '<div class="alert alert-danger">Product not found</div>';
 ?>
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0"><i class="bi bi-pencil me-2"></i>Edit Product</h4>
+    <h4 class="mb-0"><i class="bi bi-pencil me-2"></i>Edit Stock Item</h4>
     <a href="?page=products" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
 </div>
 
@@ -195,7 +221,7 @@ if (!$product) { echo '<div class="alert alert-danger">Product not found</div>';
                     <input type="text" name="sku" class="form-control" required value="<?= htmlspecialchars($product['sku']) ?>">
                 </div>
                 <div class="col-md-6 mb-3">
-                    <label class="form-label">Product Name <span class="text-danger">*</span></label>
+                    <label class="form-label">Stock Item Name <span class="text-danger">*</span></label>
                     <input type="text" name="name" class="form-control" required value="<?= htmlspecialchars($product['name']) ?>">
                 </div>
             </div>
@@ -222,7 +248,7 @@ if (!$product) { echo '<div class="alert alert-danger">Product not found</div>';
                     <input type="number" name="selling_price" class="form-control" step="0.01" min="0.01" required value="<?= $product['selling_price'] ?>">
                 </div>
                 <div class="col-md-4 mb-3">
-                    <label class="form-label">Wholesale Price (<?= $currency ?>)</label>
+                    <label class="form-label">Event Price (<?= $currency ?>)</label>
                     <input type="number" name="wholesale_price" class="form-control" step="0.01" min="0" value="<?= $product['wholesale_price'] ?>">
                 </div>
             </div>
@@ -244,7 +270,7 @@ if (!$product) { echo '<div class="alert alert-danger">Product not found</div>';
                 </div>
             </div>
             <div class="d-flex gap-2">
-                <button type="submit" class="btn btn-primary"><i class="bi bi-check-lg me-2"></i>Update Product</button>
+                <button type="submit" class="btn btn-primary"><i class="bi bi-check-lg me-2"></i>Update Stock Item</button>
                 <a href="?page=products" class="btn btn-secondary">Cancel</a>
             </div>
         </form>

@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 $action = $_GET['action'] ?? 'index';
 $currency = $settings['currency_symbol'] ?? 'LKR';
 
@@ -7,9 +7,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $customer_id = $_POST['customer_id'] ?: null;
         $items = $_POST['items'] ?? [];
         $discount = floatval($_POST['discount_amount'] ?? 0);
-        $paid = 0;
-        $payment_method = 'cash';
-        
+        $event_date = trim($_POST['event_date'] ?? '');
+        $event_address = trim($_POST['event_address'] ?? '');
+        $event_notes = trim($_POST['event_notes'] ?? '');
+
         if (!empty($items)) {
             $subtotal = 0;
             foreach ($items as $item) {
@@ -19,32 +20,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $total = $subtotal - $discount + $tax;
             $paid = $total;
             $status = 'paid';
-            
-            $lastBill = $pdo->query("SELECT bill_number FROM bills WHERE type = 'retail' ORDER BY id DESC LIMIT 1")->fetch();
+            $payment_method = 'cash';
+
+            $notesParts = [];
+            if ($event_date !== '') {
+                $notesParts[] = 'Event Date: ' . $event_date;
+            }
+            if ($event_address !== '') {
+                $notesParts[] = 'Event Address: ' . $event_address;
+            }
+            if ($event_notes !== '') {
+                $notesParts[] = 'Notes: ' . $event_notes;
+            }
+            $notes = implode(' | ', $notesParts);
+
+            $lastBill = $pdo->query("SELECT bill_number FROM bills WHERE type = 'wholesale' ORDER BY id DESC LIMIT 1")->fetch();
             $nextNum = $lastBill ? intval(substr($lastBill['bill_number'], -6)) + 1 : 1;
-            $billNumber = ($settings['invoice_prefix'] ?? 'SRF') . '-R-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
-            
+            $billNumber = ($settings['invoice_prefix'] ?? 'SRF') . '-E-' . str_pad($nextNum, 6, '0', STR_PAD_LEFT);
+
             $pdo->beginTransaction();
             try {
-                $stmt = $pdo->prepare("INSERT INTO bills (bill_number, type, customer_id, user_id, subtotal, discount_amount, tax_amount, total_amount, paid_amount, payment_status, payment_method) VALUES (?, 'retail', ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$billNumber, $customer_id, $_SESSION['user_id'], $subtotal, $discount, $tax, $total, $paid, $status, $payment_method]);
+                $stmt = $pdo->prepare("INSERT INTO bills (bill_number, type, customer_id, user_id, subtotal, discount_amount, tax_amount, total_amount, paid_amount, payment_status, payment_method, notes) VALUES (?, 'wholesale', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$billNumber, $customer_id, $_SESSION['user_id'], $subtotal, $discount, $tax, $total, $paid, $status, $payment_method, $notes]);
                 $billId = $pdo->lastInsertId();
-                
+
                 $itemStmt = $pdo->prepare("INSERT INTO bill_items (bill_id, product_id, quantity, unit_price, discount, total) VALUES (?, ?, ?, ?, ?, ?)");
                 $stockStmt = $pdo->prepare("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?");
-                
+
                 foreach ($items as $item) {
                     $itemTotal = ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
                     $itemStmt->execute([$billId, $item['product_id'], $item['quantity'], $item['price'], $item['discount'] ?? 0, $itemTotal]);
                     $stockStmt->execute([$item['quantity'], $item['product_id']]);
                 }
-                
+
                 $pdo->commit();
-                header("Location: ?page=retail&action=view&id=$billId&success=1");
+                header("Location: ?page=event&action=view&id=$billId&success=1");
                 exit;
             } catch (Exception $e) {
                 $pdo->rollBack();
-                $error = "Error: " . $e->getMessage();
+                $error = 'Error: ' . $e->getMessage();
             }
         }
     }
@@ -55,17 +69,17 @@ include 'header.php';
 
 <?php if ($action === 'index'): ?>
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0">Retail Bills</h4>
-    <a href="?page=retail&action=create" class="btn btn-primary btn-lg"><i class="bi bi-plus-lg me-2"></i>New Retail Bill</a>
+    <h4 class="mb-0">Event Bills</h4>
+    <a href="?page=event&action=create" class="btn btn-primary btn-lg"><i class="bi bi-plus-lg me-2"></i>New Event Bill</a>
 </div>
 
 <div class="card">
     <div class="card-body">
         <table class="table table-striped table-hover">
-            <thead><tr><th>Bill No</th><th>Date</th><th>Customer</th><th class="text-end">Total</th><th class="text-end">Paid</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+            <thead><tr><th>Bill No</th><th>Date</th><th>Customer</th><th class="text-end">Total</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
             <tbody>
                 <?php
-                $bills = $pdo->query("SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail' ORDER BY b.created_at DESC LIMIT 50")->fetchAll();
+                $bills = $pdo->query("SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'wholesale' ORDER BY b.created_at DESC LIMIT 50")->fetchAll();
                 foreach ($bills as $bill):
                 ?>
                 <tr>
@@ -73,15 +87,14 @@ include 'header.php';
                     <td><?= date('d M Y H:i', strtotime($bill['created_at'])) ?></td>
                     <td><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in') ?></td>
                     <td class="text-end"><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></td>
-                    <td class="text-end"><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></td>
-                    <td><span class="badge bg-<?= $bill['payment_status'] == 'paid' ? 'success' : ($bill['payment_status'] == 'partial' ? 'warning' : 'danger') ?>"><?= ucfirst($bill['payment_status']) ?></span></td>
+                    <td><span class="badge bg-success">Paid (Cash)</span></td>
                     <td class="text-end">
-                        <a href="?page=retail&action=view&id=<?= $bill['id'] ?>" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a>
-                        <a href="?page=retail&action=print&id=<?= $bill['id'] ?>" class="btn btn-sm btn-secondary" target="_blank"><i class="bi bi-printer"></i></a>
+                        <a href="?page=event&action=view&id=<?= $bill['id'] ?>" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a>
+                        <a href="?page=event&action=print&id=<?= $bill['id'] ?>" class="btn btn-sm btn-secondary" target="_blank"><i class="bi bi-printer"></i></a>
                     </td>
                 </tr>
                 <?php endforeach; ?>
-                <?php if (empty($bills)): ?><tr><td colspan="7" class="text-center text-muted py-4">No bills found</td></tr><?php endif; ?>
+                <?php if (empty($bills)): ?><tr><td colspan="6" class="text-center text-muted py-4">No event bills found</td></tr><?php endif; ?>
             </tbody>
         </table>
     </div>
@@ -95,13 +108,40 @@ $categories = $pdo->query("SELECT * FROM categories WHERE is_active = 1 ORDER BY
 ?>
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0">New Retail Bill</h4>
-    <a href="?page=retail" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
+    <h4 class="mb-0">New Event Bill</h4>
+    <a href="?page=event" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
 </div>
 
-<form method="POST" action="?page=retail&action=store" id="billForm">
+<form method="POST" action="?page=event&action=store" id="billForm">
     <div class="row">
         <div class="col-lg-8">
+            <div class="card mb-3">
+                <div class="card-header"><i class="bi bi-calendar-event me-2"></i>Event Details</div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">Customer (Optional)</label>
+                            <select name="customer_id" class="form-select">
+                                <option value="">Walk-in / New Customer</option>
+                                <?php foreach ($customers as $c): ?><option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['name']) ?> - <?= htmlspecialchars($c['phone']) ?></option><?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Event Date</label>
+                            <input type="date" name="event_date" class="form-control">
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label">Event Address</label>
+                            <input type="text" name="event_address" class="form-control" placeholder="Enter event address">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Notes</label>
+                            <input type="text" name="event_notes" class="form-control" placeholder="Optional notes">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="card mb-3">
                 <div class="card-header"><i class="bi bi-grid me-2"></i>Select Category First</div>
                 <div class="card-body">
@@ -121,7 +161,7 @@ $categories = $pdo->query("SELECT * FROM categories WHERE is_active = 1 ORDER BY
                                 <option value="">-- Select a category first --</option>
                                 <?php foreach ($products as $p): ?>
                                 <option value="<?= $p['id'] ?>" data-id="<?= $p['id'] ?>" data-category="<?= $p['category_id'] ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-sku="<?= htmlspecialchars($p['sku']) ?>" data-price="<?= $p['selling_price'] ?>" data-stock="<?= $p['stock_quantity'] ?>">
-                                    <?= htmlspecialchars($p['name']) ?> (<?= $p['sku'] ?>) - Stock: <?= $p['stock_quantity'] ?> - <?= $currency ?> <?= number_format($p['selling_price'], 2) ?>
+                                    <?= htmlspecialchars($p['name']) ?> (<?= htmlspecialchars($p['sku']) ?>) - Stock: <?= $p['stock_quantity'] ?> - <?= $currency ?> <?= number_format($p['selling_price'], 2) ?>
                                 </option>
                                 <?php endforeach; ?>
                             </select>
@@ -145,13 +185,6 @@ $categories = $pdo->query("SELECT * FROM categories WHERE is_active = 1 ORDER BY
             <div class="card mb-3">
                 <div class="card-header bg-primary text-white"><i class="bi bi-calculator me-2"></i>Bill Summary</div>
                 <div class="card-body">
-                    <div class="mb-3">
-                        <label class="form-label">Customer (Optional)</label>
-                        <select name="customer_id" class="form-select">
-                            <option value="">Walk-in Customer</option>
-                            <?php foreach ($customers as $c): ?><option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['name']) ?> - <?= htmlspecialchars($c['phone']) ?></option><?php endforeach; ?>
-                        </select>
-                    </div>
                     <div class="d-flex justify-content-between mb-2"><span>Subtotal:</span><span id="subtotal"><?= $currency ?> 0.00</span></div>
                     <div class="d-flex justify-content-between mb-2 align-items-center">
                         <span>Discount:</span>
@@ -174,7 +207,7 @@ $categories = $pdo->query("SELECT * FROM categories WHERE is_active = 1 ORDER BY
             </div>
 
             <div class="d-grid gap-2">
-                <button type="submit" class="btn btn-primary btn-lg" id="saveBillBtn" disabled><i class="bi bi-check-lg me-2"></i>Save Bill</button>
+                <button type="submit" class="btn btn-primary btn-lg" id="saveBillBtn" disabled><i class="bi bi-check-lg me-2"></i>Save Event Bill</button>
             </div>
         </div>
     </div>
@@ -237,9 +270,13 @@ productSelect.addEventListener('change', function() {
 function addItem(product) {
     const existing = items.findIndex(i => i.product_id == product.id);
     if (existing >= 0) {
-        const row = document.querySelector(`tr[data-index="${existing}"]`);
+        const row = document.querySelector(`tr[data-index="${items[existing].index}"]`);
         const qtyInput = row.querySelector('.qty-input');
-        if (parseInt(qtyInput.value) < product.stock) { qtyInput.value = parseInt(qtyInput.value) + 1; items[existing].quantity++; updateRowTotal(existing); }
+        if (parseInt(qtyInput.value, 10) < product.stock) {
+            qtyInput.value = parseInt(qtyInput.value, 10) + 1;
+            items[existing].quantity++;
+            updateRowTotal(items[existing].index);
+        }
         return;
     }
 
@@ -257,13 +294,13 @@ function addItem(product) {
 
 document.getElementById('itemsBody').addEventListener('input', function(e) {
     if (e.target.classList.contains('qty-input') || e.target.classList.contains('price-input') || e.target.classList.contains('discount-input')) {
-        updateRowTotal(parseInt(e.target.dataset.index));
+        updateRowTotal(parseInt(e.target.dataset.index, 10));
     }
 });
 
 document.getElementById('itemsBody').addEventListener('click', function(e) {
     if (e.target.closest('.remove-item')) {
-        const index = parseInt(e.target.closest('.remove-item').dataset.index);
+        const index = parseInt(e.target.closest('.remove-item').dataset.index, 10);
         document.querySelector(`tr[data-index="${index}"]`).remove();
         items = items.filter(i => i.index !== index);
         if (items.length === 0) document.getElementById('noItemsRow').style.display = '';
@@ -273,12 +310,16 @@ document.getElementById('itemsBody').addEventListener('click', function(e) {
 
 function updateRowTotal(index) {
     const row = document.querySelector(`tr[data-index="${index}"]`);
-    const qty = parseInt(row.querySelector('.qty-input').value) || 0;
+    const qty = parseInt(row.querySelector('.qty-input').value, 10) || 0;
     const price = parseFloat(row.querySelector('.price-input').value) || 0;
     const discount = parseFloat(row.querySelector('.discount-input').value) || 0;
     row.querySelector('.row-total').textContent = `${currency} ${((qty * price) - discount).toFixed(2)}`;
     const idx = items.findIndex(i => i.index === index);
-    if (idx >= 0) { items[idx].quantity = qty; items[idx].price = price; items[idx].discount = discount; }
+    if (idx >= 0) {
+        items[idx].quantity = qty;
+        items[idx].price = price;
+        items[idx].discount = discount;
+    }
     updateTotals();
 }
 
@@ -288,7 +329,7 @@ function updateTotals() {
     const discount = parseFloat(document.getElementById('discountAmount').value) || 0;
     const tax = ((subtotal - discount) * taxRate) / 100;
     const grandTotal = subtotal - discount + tax;
-    
+
     document.getElementById('subtotal').textContent = `${currency} ${subtotal.toFixed(2)}`;
     document.getElementById('taxAmount').textContent = `${currency} ${tax.toFixed(2)}`;
     document.getElementById('grandTotal').textContent = `${currency} ${grandTotal.toFixed(2)}`;
@@ -311,13 +352,13 @@ $items->execute([$id]);
 $items = $items->fetchAll();
 ?>
 
-<?php if (isset($_GET['success'])): ?><div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>Bill created successfully!</div><?php endif; ?>
+<?php if (isset($_GET['success'])): ?><div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>Event bill created successfully!</div><?php endif; ?>
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0">Bill - <?= htmlspecialchars($bill['bill_number']) ?></h4>
+    <h4 class="mb-0">Event Bill - <?= htmlspecialchars($bill['bill_number']) ?></h4>
     <div>
-        <a href="?page=retail&action=print&id=<?= $bill['id'] ?>" class="btn btn-primary" target="_blank"><i class="bi bi-printer me-2"></i>Print</a>
-        <a href="?page=retail" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
+        <a href="?page=event&action=print&id=<?= $bill['id'] ?>" class="btn btn-primary" target="_blank"><i class="bi bi-printer me-2"></i>Print</a>
+        <a href="?page=event" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
     </div>
 </div>
 
@@ -326,15 +367,21 @@ $items = $items->fetchAll();
         <div class="card mb-4">
             <div class="card-header bg-primary text-white d-flex justify-content-between">
                 <span><i class="bi bi-receipt me-2"></i>Bill Information</span>
-                <span class="badge bg-light text-<?= $bill['payment_status'] == 'paid' ? 'success' : ($bill['payment_status'] == 'partial' ? 'warning' : 'danger') ?> fs-6"><?= ucfirst($bill['payment_status']) ?></span>
+                <span class="badge bg-light text-success fs-6">Paid (Cash)</span>
             </div>
             <div class="card-body">
                 <div class="row">
                     <div class="col-md-3"><label class="text-muted small">Bill Number</label><p class="fw-bold"><?= htmlspecialchars($bill['bill_number']) ?></p></div>
-                    <div class="col-md-3"><label class="text-muted small">Type</label><p><span class="badge bg-primary"><?= ucfirst($bill['type']) ?></span></p></div>
+                    <div class="col-md-3"><label class="text-muted small">Type</label><p><span class="badge bg-primary">Event</span></p></div>
                     <div class="col-md-3"><label class="text-muted small">Date</label><p><?= date('d M Y H:i', strtotime($bill['created_at'])) ?></p></div>
                     <div class="col-md-3"><label class="text-muted small">Customer</label><p><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in') ?></p></div>
                 </div>
+                <?php if (!empty($bill['notes'])): ?>
+                <div class="mt-2 p-3 bg-light rounded border">
+                    <label class="text-muted small">Event Details</label>
+                    <div><?= htmlspecialchars($bill['notes']) ?></div>
+                </div>
+                <?php endif; ?>
             </div>
         </div>
 
@@ -370,8 +417,7 @@ $items = $items->fetchAll();
                 <hr>
                 <div class="d-flex justify-content-between mb-2"><strong class="fs-5">Grand Total:</strong><strong class="fs-5 text-primary"><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></strong></div>
                 <hr>
-                <div class="d-flex justify-content-between mb-2"><span>Paid:</span><span class="text-success"><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></span></div>
-                <div class="d-flex justify-content-between"><strong>Balance:</strong><strong class="<?= ($bill['total_amount'] - $bill['paid_amount']) > 0 ? 'text-danger' : 'text-success' ?>"><?= $currency ?> <?= number_format($bill['total_amount'] - $bill['paid_amount'], 2) ?></strong></div>
+                <div class="d-flex justify-content-between"><strong>Paid in Cash:</strong><strong class="text-success"><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></strong></div>
             </div>
         </div>
     </div>
@@ -392,19 +438,19 @@ $items = $items->fetchAll();
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Invoice - <?= htmlspecialchars($bill['bill_number']) ?></title>
+    <title>Event Invoice - <?= htmlspecialchars($bill['bill_number']) ?></title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: Arial, sans-serif; font-size: 12px; padding: 20px; }
         .invoice { max-width: 800px; margin: 0 auto; }
-        .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 20px; }
-        .company-name { font-size: 24px; font-weight: bold; }
+        .header { text-align: center; border-bottom: 3px solid #0d6efd; padding-bottom: 15px; margin-bottom: 20px; }
+        .company-name { font-size: 24px; font-weight: bold; color: #0d6efd; }
         table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-        th { background: #333; color: white; padding: 10px; text-align: left; }
+        th { background: #0d6efd; color: white; padding: 10px; text-align: left; }
         td { padding: 10px; border-bottom: 1px solid #ddd; }
         .totals { float: right; width: 300px; }
         .totals-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
-        .grand-total { font-size: 16px; font-weight: bold; border-top: 2px solid #333; }
+        .grand-total { font-size: 16px; font-weight: bold; color: #0d6efd; border-top: 2px solid #0d6efd; }
         .footer { clear: both; margin-top: 40px; text-align: center; font-size: 10px; color: #666; }
         @media print { .no-print { display: none; } }
     </style>
@@ -414,12 +460,19 @@ $items = $items->fetchAll();
         <div class="header">
             <div class="company-name"><?= htmlspecialchars($settings['company_name'] ?? 'Sri Ram Fire Works') ?></div>
             <div><?= htmlspecialchars($settings['company_address'] ?? '') ?></div>
+            <h2 style="margin-top:10px; background:#0d6efd; color:white; display:inline-block; padding:5px 20px">EVENT INVOICE</h2>
         </div>
-        
+
         <div style="display:flex; justify-content:space-between; margin-bottom:20px">
-            <div><strong>Bill To:</strong><br><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in Customer') ?></div>
-            <div style="text-align:right"><strong>Invoice:</strong> <?= htmlspecialchars($bill['bill_number']) ?><br><strong>Date:</strong> <?= date('d M Y', strtotime($bill['created_at'])) ?></div>
+            <div><strong>Bill To:</strong><br><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in Customer') ?><br><?= htmlspecialchars($bill['customer_phone'] ?? '') ?></div>
+            <div style="text-align:right"><strong>Invoice:</strong> <?= htmlspecialchars($bill['bill_number']) ?><br><strong>Date:</strong> <?= date('d M Y', strtotime($bill['created_at'])) ?><br><strong>Payment:</strong> Cash</div>
         </div>
+
+        <?php if (!empty($bill['notes'])): ?>
+        <div style="margin-bottom:15px; padding:10px; background:#f8f9fa; border:1px solid #dee2e6;">
+            <strong>Event Details:</strong> <?= htmlspecialchars($bill['notes']) ?>
+        </div>
+        <?php endif; ?>
 
         <table>
             <thead><tr><th>#</th><th>Product</th><th>Qty</th><th>Price</th><th>Discount</th><th>Total</th></tr></thead>
@@ -435,12 +488,11 @@ $items = $items->fetchAll();
             <div class="totals-row"><span>Discount:</span><span>- <?= $currency ?> <?= number_format($bill['discount_amount'], 2) ?></span></div>
             <div class="totals-row"><span>Tax:</span><span><?= $currency ?> <?= number_format($bill['tax_amount'], 2) ?></span></div>
             <div class="totals-row grand-total"><span>Grand Total:</span><span><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></span></div>
-            <div class="totals-row"><span>Paid:</span><span><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></span></div>
-            <div class="totals-row"><span>Balance:</span><span><?= $currency ?> <?= number_format($bill['total_amount'] - $bill['paid_amount'], 2) ?></span></div>
+            <div class="totals-row"><span>Paid in Cash:</span><span><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></span></div>
         </div>
 
         <div class="footer"><p>Thank you for your business!</p></div>
-        <div class="no-print" style="text-align:center; margin-top:20px"><button onclick="window.print()" style="padding:10px 30px; background:#333; color:white; border:none; border-radius:5px; cursor:pointer">Print Invoice</button></div>
+        <div class="no-print" style="text-align:center; margin-top:20px"><button onclick="window.print()" style="padding:10px 30px; background:#0d6efd; color:white; border:none; border-radius:5px; cursor:pointer">Print Invoice</button></div>
     </div>
 </body>
 </html>

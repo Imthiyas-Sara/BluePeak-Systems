@@ -29,7 +29,7 @@ include 'header.php';
                 <select name="type" class="form-select">
                     <option value="all" <?= $type == 'all' ? 'selected' : '' ?>>All</option>
                     <option value="retail" <?= $type == 'retail' ? 'selected' : '' ?>>Retail</option>
-                    <option value="wholesale" <?= $type == 'wholesale' ? 'selected' : '' ?>>Wholesale</option>
+                    <option value="wholesale" <?= $type == 'wholesale' ? 'selected' : '' ?>>Event</option>
                 </select>
             </div>
             <div class="col-md-3">
@@ -234,11 +234,11 @@ $statusBreakdown = $statusStmt->fetchAll();
                     <td><strong><?= htmlspecialchars($b['bill_number']) ?></strong></td>
                     <td><?= date('d M Y H:i', strtotime($b['created_at'])) ?></td>
                     <td><?= htmlspecialchars($b['customer_name'] ?? 'Walk-in') ?></td>
-                    <td><span class="badge bg-<?= $b['type'] == 'wholesale' ? 'success' : 'primary' ?>"><?= ucfirst($b['type']) ?></span></td>
+                    <td><span class="badge bg-<?= $b['type'] == 'wholesale' ? 'success' : 'primary' ?>"><?= $b['type'] == 'wholesale' ? 'Event' : 'Retail' ?></span></td>
                     <td class="text-end"><?= $currency ?> <?= number_format($b['total_amount'], 2) ?></td>
                     <td class="text-end"><?= $currency ?> <?= number_format($b['paid_amount'], 2) ?></td>
                     <td><span class="badge bg-<?= $b['payment_status'] == 'paid' ? 'success' : ($b['payment_status'] == 'partial' ? 'warning' : 'danger') ?>"><?= ucfirst($b['payment_status']) ?></span></td>
-                    <td><a href="?page=<?= $b['type'] ?>&action=view&id=<?= $b['id'] ?>" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a></td>
+                    <td><a href="?page=<?= $b['type'] == 'wholesale' ? 'event' : 'retail' ?>&action=view&id=<?= $b['id'] ?>" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a></td>
                 </tr>
                 <?php endforeach; ?>
                 <?php if (empty($bills)): ?><tr><td colspan="8" class="text-center text-muted py-4">No bills found</td></tr><?php endif; ?>

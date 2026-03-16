@@ -76,7 +76,7 @@ include 'header.php';
     ?>
     <div class="col-md-3"><div class="card bg-primary text-white"><div class="card-body text-center"><h4><?= $totalCustomers ?></h4><small>Total Customers</small></div></div></div>
     <div class="col-md-3"><div class="card bg-info text-white"><div class="card-body text-center"><h4><?= $retailCount ?></h4><small>Retail</small></div></div></div>
-    <div class="col-md-3"><div class="card bg-success text-white"><div class="card-body text-center"><h4><?= $wholesaleCount ?></h4><small>Wholesale</small></div></div></div>
+    <div class="col-md-3"><div class="card bg-success text-white"><div class="card-body text-center"><h4><?= $wholesaleCount ?></h4><small>Event</small></div></div></div>
     <div class="col-md-3"><div class="card bg-danger text-white"><div class="card-body text-center"><h4><?= $currency ?> <?= number_format($totalBalance, 2) ?></h4><small>Total Outstanding</small></div></div></div>
 </div>
 
@@ -95,7 +95,7 @@ include 'header.php';
                     <td><strong><?= htmlspecialchars($c['name']) ?></strong></td>
                     <td><?= htmlspecialchars($c['phone'] ?: '-') ?></td>
                     <td><?= htmlspecialchars($c['email'] ?: '-') ?></td>
-                    <td><span class="badge bg-<?= $c['type'] == 'wholesale' ? 'success' : 'info' ?>"><?= ucfirst($c['type']) ?></span></td>
+                    <td><span class="badge bg-<?= $c['type'] == 'wholesale' ? 'success' : 'info' ?>"><?= $c['type'] == 'wholesale' ? 'Event' : 'Retail' ?></span></td>
                     <td class="text-end <?= $c['balance'] > 0 ? 'text-danger fw-bold' : 'text-success' ?>"><?= $currency ?> <?= number_format($c['balance'], 2) ?></td>
                     <td><span class="badge bg-<?= $c['is_active'] ? 'success' : 'secondary' ?>"><?= $c['is_active'] ? 'Active' : 'Inactive' ?></span></td>
                     <td class="text-end">
@@ -149,7 +149,7 @@ function deleteCustomer(id, name) {
                     <label class="form-label">Customer Type</label>
                     <select name="type" class="form-select">
                         <option value="retail">Retail Customer</option>
-                        <option value="wholesale">Wholesale Customer</option>
+                        <option value="wholesale">Event Customer</option>
                     </select>
                 </div>
             </div>
@@ -208,7 +208,7 @@ if (!$customer) { echo '<div class="alert alert-danger">Customer not found</div>
                     <label class="form-label">Customer Type</label>
                     <select name="type" class="form-select">
                         <option value="retail" <?= $customer['type'] == 'retail' ? 'selected' : '' ?>>Retail Customer</option>
-                        <option value="wholesale" <?= $customer['type'] == 'wholesale' ? 'selected' : '' ?>>Wholesale Customer</option>
+                        <option value="wholesale" <?= $customer['type'] == 'wholesale' ? 'selected' : '' ?>>Event Customer</option>
                     </select>
                 </div>
             </div>
@@ -269,7 +269,7 @@ $totalPurchases = $totalPurchases->fetchColumn() ?: 0;
         <div class="card mb-4">
             <div class="card-header"><i class="bi bi-person-badge me-2"></i>Customer Details</div>
             <div class="card-body">
-                <p><strong>Type:</strong> <span class="badge bg-<?= $customer['type'] == 'wholesale' ? 'success' : 'info' ?>"><?= ucfirst($customer['type']) ?></span></p>
+                <p><strong>Type:</strong> <span class="badge bg-<?= $customer['type'] == 'wholesale' ? 'success' : 'info' ?>"><?= $customer['type'] == 'wholesale' ? 'Event' : 'Retail' ?></span></p>
                 <p><strong>Phone:</strong> <?= htmlspecialchars($customer['phone'] ?: 'N/A') ?></p>
                 <p><strong>Email:</strong> <?= htmlspecialchars($customer['email'] ?: 'N/A') ?></p>
                 <p><strong>Address:</strong> <?= htmlspecialchars($customer['address'] ?: 'N/A') ?></p>
@@ -306,10 +306,10 @@ $totalPurchases = $totalPurchases->fetchColumn() ?: 0;
                         <tr>
                             <td><strong><?= htmlspecialchars($b['bill_number']) ?></strong></td>
                             <td><?= date('d M Y', strtotime($b['created_at'])) ?></td>
-                            <td><span class="badge bg-<?= $b['type'] == 'wholesale' ? 'success' : 'primary' ?>"><?= ucfirst($b['type']) ?></span></td>
+                            <td><span class="badge bg-<?= $b['type'] == 'wholesale' ? 'success' : 'primary' ?>"><?= $b['type'] == 'wholesale' ? 'Event' : 'Retail' ?></span></td>
                             <td class="text-end"><?= $currency ?> <?= number_format($b['total_amount'], 2) ?></td>
                             <td><span class="badge bg-<?= $b['payment_status'] == 'paid' ? 'success' : ($b['payment_status'] == 'partial' ? 'warning' : 'danger') ?>"><?= ucfirst($b['payment_status']) ?></span></td>
-                            <td><a href="?page=<?= $b['type'] ?>&action=view&id=<?= $b['id'] ?>" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a></td>
+                            <td><a href="?page=<?= $b['type'] == 'wholesale' ? 'event' : 'retail' ?>&action=view&id=<?= $b['id'] ?>" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a></td>
                         </tr>
                         <?php endforeach; ?>
                         <?php if (empty($bills)): ?><tr><td colspan="6" class="text-center text-muted py-4">No bills found</td></tr><?php endif; ?>

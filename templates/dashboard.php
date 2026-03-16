@@ -36,9 +36,9 @@ include 'header.php';
     <div class="col-md-3">
         <div class="card stat-card info">
             <div class="card-body">
-                <h6 class="text-muted"><i class="bi bi-box-seam me-2"></i>Products</h6>
+                <h6 class="text-muted"><i class="bi bi-box-seam me-2"></i>Stocks</h6>
                 <h3 class="mb-0"><?= $totalProducts ?></h3>
-                <small class="text-muted">Active products</small>
+                <small class="text-muted">Active items</small>
             </div>
         </div>
     </div>
@@ -70,7 +70,7 @@ include 'header.php';
                         <tr>
                             <td><strong><?= htmlspecialchars($bill['bill_number']) ?></strong></td>
                             <td><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in') ?></td>
-                            <td><span class="badge bg-<?= $bill['type'] == 'retail' ? 'primary' : 'success' ?>"><?= ucfirst($bill['type']) ?></span></td>
+                            <td><span class="badge bg-<?= $bill['type'] == 'retail' ? 'primary' : 'success' ?>"><?= $bill['type'] == 'wholesale' ? 'Event' : 'Retail' ?></span></td>
                             <td class="text-end"><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></td>
                             <td><span class="badge bg-<?= $bill['payment_status'] == 'paid' ? 'success' : ($bill['payment_status'] == 'partial' ? 'warning' : 'danger') ?>"><?= ucfirst($bill['payment_status']) ?></span></td>
                         </tr>
@@ -89,8 +89,8 @@ include 'header.php';
             <div class="card-body">
                 <div class="d-grid gap-2">
                     <a href="?page=retail&action=create" class="btn btn-primary"><i class="bi bi-cart-plus me-2"></i>New Retail Bill</a>
-                    <a href="?page=wholesale&action=create" class="btn btn-success"><i class="bi bi-truck me-2"></i>New Wholesale Bill</a>
-                    <a href="?page=products&action=create" class="btn btn-outline-primary"><i class="bi bi-plus-lg me-2"></i>Add Product</a>
+                    <a href="?page=event&action=create" class="btn btn-success"><i class="bi bi-calendar-event me-2"></i>New Event Bill</a>
+                    <a href="?page=products&action=create" class="btn btn-outline-primary"><i class="bi bi-plus-lg me-2"></i>Add Stock Item</a>
                     <a href="?page=customers&action=create" class="btn btn-outline-secondary"><i class="bi bi-person-plus me-2"></i>Add Customer</a>
                 </div>
             </div>

@@ -94,7 +94,7 @@ include 'header.php';
                     <div class="mb-3">
                         <label class="form-label">Invoice Prefix</label>
                         <input type="text" name="invoice_prefix" class="form-control" value="<?= htmlspecialchars($settings['invoice_prefix'] ?? 'SRF') ?>" maxlength="10">
-                        <small class="text-muted">Bill numbers will be: PREFIX-R-000001 (retail), PREFIX-W-000001 (wholesale)</small>
+                        <small class="text-muted">Bill numbers will be: PREFIX-R-000001 (retail), PREFIX-E-000001 (event)</small>
                     </div>
                 </div>
             </div>
@@ -112,7 +112,7 @@ include 'header.php';
                 </div>
                 <div class="col-md-3 mb-3">
                     <div class="d-grid">
-                        <a href="?page=products" class="btn btn-outline-success"><i class="bi bi-box-seam me-2"></i>Manage Products</a>
+                        <a href="?page=products" class="btn btn-outline-success"><i class="bi bi-box-seam me-2"></i>Manage Stocks</a>
                     </div>
                 </div>
                 <div class="col-md-3 mb-3">

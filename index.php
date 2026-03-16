@@ -194,7 +194,10 @@ if (!isset($_SESSION['user_id'])) {
 
 // Get current page
 $page = $_GET['page'] ?? 'dashboard';
-$validPages = ['dashboard', 'retail', 'wholesale', 'products', 'categories', 'customers', 'reports', 'settings'];
+if ($page === 'wholesale') {
+    $page = 'event';
+}
+$validPages = ['dashboard', 'retail', 'event', 'products', 'categories', 'customers', 'suppliers', 'employees', 'reports', 'settings'];
 
 if (!in_array($page, $validPages)) {
     $page = 'dashboard';
