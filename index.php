@@ -98,6 +98,40 @@ try {
         FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
     )");
     
+    $pdo->exec("CREATE TABLE IF NOT EXISTS employees (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        uid VARCHAR(50) UNIQUE NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        address TEXT,
+        employee_type ENUM('daily_paid', 'monthly_paid') DEFAULT 'daily_paid',
+        phone VARCHAR(20),
+        daily_wage DECIMAL(10,2),
+        monthly_salary DECIMAL(10,2),
+        is_active TINYINT(1) DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )");
+    
+    $pdo->exec("CREATE TABLE IF NOT EXISTS attendance (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        employee_id INT NOT NULL,
+        attendance_date DATE NOT NULL,
+        status ENUM('present', 'absent', 'leave') DEFAULT 'present',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+        UNIQUE KEY unique_attendance (employee_id, attendance_date)
+    )");
+    
+    $pdo->exec("CREATE TABLE IF NOT EXISTS salary_payments (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        employee_id INT NOT NULL,
+        month VARCHAR(7) NOT NULL,
+        status ENUM('pending', 'paid') DEFAULT 'pending',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+        UNIQUE KEY unique_salary_payment (employee_id, month)
+    )");
+    
     $pdo->exec("CREATE TABLE IF NOT EXISTS settings (
         id INT AUTO_INCREMENT PRIMARY KEY,
         setting_key VARCHAR(100) UNIQUE NOT NULL,
@@ -146,6 +180,67 @@ try {
             ('SRF-0004', 'Golden Fountain', 4, 250, 350, 300, 40),
             ('SRF-0005', 'Flower Pot Deluxe', 5, 180, 250, 220, 60)
         ");
+    }
+    
+    // Insert sample employees if empty
+    $stmt = $pdo->query("SELECT COUNT(*) FROM employees");
+    if ($stmt->fetchColumn() == 0) {
+        $pdo->exec("INSERT INTO employees (uid, name, address, employee_type, phone, daily_wage) VALUES 
+            ('EMP-001', 'Mithlesh Kumar Singh', 'Kiribathgoda, Colombo', 'daily_paid', '0987569326', 2000),
+            ('EMP-002', 'Suron Maherjan', 'Nattandiya, Puttalam', 'daily_paid', '0987569327', 2000),
+            ('EMP-003', 'Sandesh Bajracharya', 'Borella, Colombo', 'daily_paid', '0987569328', 2200),
+            ('EMP-004', 'Subin Sedhai', 'Kaduwela, Colombo', 'daily_paid', '0987569329', 2000),
+            ('EMP-005', 'Wonjala Joshi', 'Maharagama, Colombo', 'daily_paid', '0987569330', 1950)
+        ");
+    }
+    
+    // Insert sample attendance data if empty
+    $stmt = $pdo->query("SELECT COUNT(*) FROM attendance");
+    if ($stmt->fetchColumn() == 0) {
+        // Get existing employee IDs
+        $stmt = $pdo->query("SELECT id FROM employees ORDER BY id LIMIT 5");
+        $employeeIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        if (count($employeeIds) >= 5) {
+            $today = date('Y-m-d');
+            $yesterday = date('Y-m-d', strtotime('-1 day'));
+            
+            $attendanceData = [
+                [$employeeIds[0], $today, 'present'],
+                [$employeeIds[1], $today, 'present'],
+                [$employeeIds[2], $today, 'absent'],
+                [$employeeIds[3], $today, 'present'],
+                [$employeeIds[4], $today, 'present'],
+                [$employeeIds[0], $yesterday, 'present'],
+                [$employeeIds[1], $yesterday, 'present'],
+                [$employeeIds[2], $yesterday, 'present'],
+                [$employeeIds[3], $yesterday, 'absent'],
+                [$employeeIds[4], $yesterday, 'present']
+            ];
+            
+            $stmt = $pdo->prepare("INSERT INTO attendance (employee_id, attendance_date, status) VALUES (?, ?, ?)");
+            foreach ($attendanceData as $record) {
+                $stmt->execute($record);
+            }
+        }
+    }
+    
+    // Database integrity fix - run on every load to ensure consistency
+    try {
+        // Remove orphaned attendance records
+        $stmt = $pdo->prepare("DELETE a FROM attendance a LEFT JOIN employees e ON a.employee_id = e.id WHERE e.id IS NULL");
+        $stmt->execute();
+        
+        // Clean up duplicate attendance records (keep the latest)
+        $pdo->exec("
+            DELETE a1 FROM attendance a1
+            INNER JOIN attendance a2
+            WHERE a1.employee_id = a2.employee_id
+            AND a1.attendance_date = a2.attendance_date
+            AND a1.id < a2.id
+        ");
+    } catch (Exception $e) {
+        // Ignore errors during cleanup
     }
     
 } catch (PDOException $e) {
