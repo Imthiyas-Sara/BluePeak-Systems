@@ -13,7 +13,7 @@ $pageTitleMap = [
 ];
 $currentPageTitle = $pageTitleMap[$page] ?? ucfirst($page);
 $currentAction = $_GET['action'] ?? 'index';
-$showReportButton = in_array($page, ['retail', 'event', 'suppliers', 'employees']) && $currentAction === 'index';
+$showReportButton = in_array($page, ['retail', 'event', 'products', 'suppliers', 'employees']) && $currentAction === 'index';
 ?>
 <!DOCTYPE html>
 <html lang="en">
