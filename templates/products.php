@@ -65,6 +65,37 @@ $selectedCategory = intval($_GET['category'] ?? 0);
     <h4 class="mb-0"><i class="bi bi-box-seam me-2"></i>Stocks</h4>
     <div class="d-flex gap-2">
         <a href="?page=categories" class="btn btn-outline-secondary"><i class="bi bi-tags me-2"></i>Manage Categories</a>
+        <div class="dropdown">
+            <button class="btn btn-primary dropdown-toggle" type="button" id="stockReportDropdown" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                <i class="bi bi-download me-2"></i>Download Report
+            </button>
+            <div class="dropdown-menu p-3" style="min-width: 320px; max-height: 420px; overflow-y: auto;" aria-labelledby="stockReportDropdown">
+                <h6 class="mb-2">Stock Report Types</h6>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="stockReportType" id="stockReportAll" value="all" checked>
+                    <label class="form-check-label" for="stockReportAll">All Stock Details</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="stockReportType" id="stockReportLow" value="low">
+                    <label class="form-check-label" for="stockReportLow">Low Stock</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="stockReportType" id="stockReportOut" value="out">
+                    <label class="form-check-label" for="stockReportOut">Out of Stock</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="stockReportType" id="stockReportActive" value="active">
+                    <label class="form-check-label" for="stockReportActive">Active Stock Items</label>
+                </div>
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="radio" name="stockReportType" id="stockReportInactive" value="inactive">
+                    <label class="form-check-label" for="stockReportInactive">Inactive Stock Items</label>
+                </div>
+                <button type="button" class="btn btn-primary w-100" onclick="downloadStockPdfReport()">
+                    <i class="bi bi-file-earmark-pdf me-2"></i>Download PDF
+                </button>
+            </div>
+        </div>
         <a href="?page=products&action=create" class="btn btn-primary"><i class="bi bi-plus-lg me-2"></i>Add Stock Item</a>
     </div>
 </div>
@@ -125,12 +156,127 @@ $selectedCategory = intval($_GET['category'] ?? 0);
 </div>
 
 <form id="deleteForm" method="POST" style="display:none"></form>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
 <script>
+const stockReportRows = <?= json_encode($products, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+const stockCurrency = <?= json_encode($currency) ?>;
+
 function deleteProduct(id, name) {
     if (confirm('Delete product "' + name + '"?')) {
         document.getElementById('deleteForm').action = '?page=products&action=delete&id=' + id;
         document.getElementById('deleteForm').submit();
     }
+}
+
+function selectedStockReportType() {
+    const selected = document.querySelector('input[name="stockReportType"]:checked');
+    return selected ? selected.value : 'all';
+}
+
+function filterStockRows(type) {
+    return stockReportRows.filter(function(row) {
+        const stock = Number(row.stock_quantity || 0);
+        const minLevel = Number(row.min_stock_level || 0);
+        const isActive = Number(row.is_active || 0) === 1;
+
+        if (type === 'low') {
+            return stock > 0 && stock <= minLevel;
+        }
+        if (type === 'out') {
+            return stock <= 0;
+        }
+        if (type === 'active') {
+            return isActive;
+        }
+        if (type === 'inactive') {
+            return !isActive;
+        }
+        return true;
+    });
+}
+
+function reportLabel(type) {
+    if (type === 'low') {
+        return 'Low Stock';
+    }
+    if (type === 'out') {
+        return 'Out of Stock';
+    }
+    if (type === 'active') {
+        return 'Active Stock Items';
+    }
+    if (type === 'inactive') {
+        return 'Inactive Stock Items';
+    }
+    return 'All Stock Details';
+}
+
+function downloadStockPdfReport() {
+    const type = selectedStockReportType();
+    const rows = filterStockRows(type);
+
+    if (!rows.length) {
+        alert('No records found for the selected report type.');
+        return;
+    }
+
+    const jsPDFCtor = window.jspdf && window.jspdf.jsPDF;
+    if (!jsPDFCtor || typeof window.jspdf.jsPDF !== 'function') {
+        alert('PDF library failed to load. Please refresh and try again.');
+        return;
+    }
+
+    const doc = new jsPDFCtor({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    const reportTypeLabel = reportLabel(type);
+    const now = new Date();
+
+    doc.setFontSize(15);
+    doc.text('Stock Report - ' + reportTypeLabel, 40, 40);
+    doc.setFontSize(10);
+    doc.setTextColor(90);
+    doc.text('Generated: ' + now.toLocaleString(), 40, 58);
+
+    const body = rows.map(function(row) {
+        const stock = Number(row.stock_quantity || 0);
+        const minLevel = Number(row.min_stock_level || 0);
+        let stockStatus = 'In Stock';
+
+        if (stock <= 0) {
+            stockStatus = 'Out of Stock';
+        } else if (stock <= minLevel) {
+            stockStatus = 'Low Stock';
+        }
+
+        return [
+            String(row.sku || ''),
+            String(row.name || ''),
+            String(row.category_name || 'Uncategorized'),
+            stockCurrency + ' ' + Number(row.cost_price || 0).toFixed(2),
+            stockCurrency + ' ' + Number(row.selling_price || 0).toFixed(2),
+            stockCurrency + ' ' + Number(row.wholesale_price || 0).toFixed(2),
+            String(stock),
+            stockStatus,
+            Number(row.is_active || 0) === 1 ? 'Active' : 'Inactive'
+        ];
+    });
+
+    doc.autoTable({
+        startY: 72,
+        head: [['SKU', 'Stock Item', 'Category', 'Cost', 'Retail', 'Event', 'Qty', 'Stock Level', 'Status']],
+        body: body,
+        styles: { fontSize: 9, cellPadding: 6 },
+        headStyles: { fillColor: [33, 37, 41] },
+        columnStyles: {
+            3: { halign: 'right' },
+            4: { halign: 'right' },
+            5: { halign: 'right' },
+            6: { halign: 'center' }
+        }
+    });
+
+    const fileDate = now.toISOString().slice(0, 10);
+    doc.save('stock-report-' + type + '-' + fileDate + '.pdf');
 }
 </script>
 
