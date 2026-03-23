@@ -49,22 +49,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } elseif ($action === 'download') {
         // Get filter parameters
-        $reportTypes = $_GET['report_type'] ?? ['all'];
-        $reportTypes = is_array($reportTypes) ? $reportTypes : [$reportTypes];
-        $dateFrom = $_GET['date_from'] ?? '';
-        $dateTo = $_GET['date_to'] ?? '';
-        $priceFrom = $_GET['price_from'] ?? '';
-        $priceTo = $_GET['price_to'] ?? '';
+        $reportType = isset($_GET['report_type']) && $_GET['report_type'] === 'paid' ? 'paid' : 'all';
+        $dateFrom = isset($_GET['date_from']) && $_GET['date_from'] !== '' ? $_GET['date_from'] : null;
+        $dateTo = isset($_GET['date_to']) && $_GET['date_to'] !== '' ? $_GET['date_to'] : null;
+        $priceFrom = isset($_GET['price_from']) && $_GET['price_from'] !== '' ? floatval($_GET['price_from']) : null;
+        $priceTo = isset($_GET['price_to']) && $_GET['price_to'] !== '' ? floatval($_GET['price_to']) : null;
         
         // Build query
         $query = "SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail'";
         $params = [];
         
         // Apply report type filter
-        if (!in_array('all', $reportTypes)) {
-            if (in_array('paid', $reportTypes)) {
-                $query .= " AND b.payment_status = 'paid'";
-            }
+        if ($reportType === 'paid') {
+            $query .= " AND b.payment_status = 'paid'";
         }
         
         // Apply date filters
@@ -78,13 +75,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         
         // Apply price filters
-        if ($priceFrom !== '' && $priceFrom !== null) {
+        if ($priceFrom !== null) {
             $query .= " AND b.total_amount >= ?";
-            $params[] = floatval($priceFrom);
+            $params[] = $priceFrom;
         }
-        if ($priceTo !== '' && $priceTo !== null) {
+        if ($priceTo !== null) {
             $query .= " AND b.total_amount <= ?";
-            $params[] = floatval($priceTo);
+            $params[] = $priceTo;
         }
         
         $query .= " ORDER BY b.created_at DESC";
@@ -93,100 +90,134 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->execute($params);
         $bills = $stmt->fetchAll();
         
-        // Generate PDF
-        $pdf = "<!DOCTYPE html>
-<html>
-<head>
-<meta charset='UTF-8'>
-<title>Retail Bills Report</title>
-<style>
-body { font-family: Arial, sans-serif; margin: 20px; }
-.header { text-align: center; margin-bottom: 20px; }
-.header h1 { margin: 0; }
-.filters { margin-bottom: 15px; font-size: 12px; color: #666; }
-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-th { background-color: #4f46e5; color: white; padding: 8px; text-align: left; font-weight: bold; }
-td { padding: 8px; border-bottom: 1px solid #ddd; }
-tr:nth-child(even) { background-color: #f9f9f9; }
-.text-end { text-align: right; }
-.footer { margin-top: 20px; font-size: 11px; color: #999; }
-</style>
-</head>
-<body>
-<div class='header'>
-<h1>Retail Bills Report</h1>
-<p>Generated on " . date('d M Y H:i:s') . "</p>
-</div>
-<div class='filters'>
-<strong>Filters Applied:</strong><br>
-Report Type: " . (in_array('paid', $reportTypes) ? 'Paid Bills Only' : 'All Records') . "<br>";
-        
-        if ($dateFrom || $dateTo) {
-            $pdf .= "Date Range: " . ($dateFrom ?: 'Any') . " to " . ($dateTo ?: 'Any') . "<br>";
-        }
-        if ($priceFrom !== '' || $priceTo !== '') {
-            $pdf .= "Price Range: " . ($priceFrom ?: '0') . " to " . ($priceTo ?: 'Unlimited') . " " . htmlspecialchars($settings['currency_symbol'] ?? 'LKR') . "<br>";
-        }
-        
-        $pdf .= "</div>
-
-<table>
-<thead>
-<tr>
-<th>Bill No</th>
-<th>Date</th>
-<th>Customer</th>
-<th class='text-end'>Total</th>
-<th class='text-end'>Paid</th>
-<th class='text-end'>Balance</th>
-<th>Status</th>
-</tr>
-</thead>
-<tbody>";
-        
+        // Calculate totals
         $totalAmount = 0;
         $totalPaid = 0;
         $totalBalance = 0;
-        
         foreach ($bills as $bill) {
-            $balance = floatval($bill['total_amount']) - floatval($bill['paid_amount']);
             $totalAmount += floatval($bill['total_amount']);
             $totalPaid += floatval($bill['paid_amount']);
-            $totalBalance += $balance;
+            $totalBalance += floatval($bill['total_amount']) - floatval($bill['paid_amount']);
+        }
+        
+        // Generate PDF content
+        $pdf = "%PDF-1.4\n";
+        $pdf .= "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+        $pdf .= "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+        
+        // Create page content
+        $content = "";
+        $y = 750;
+        $pageWidth = 595;
+        $pageHeight = 842;
+        $margin = 40;
+        
+        // Title
+        $content .= "BT\n/F1 18 Tf\n" . $margin . " " . $y . " Td\n(Retail Bills Report) Tj\nET\n";
+        $y -= 30;
+        
+        // Generated date
+        $content .= "BT\n/F1 10 Tf\n" . $margin . " " . $y . " Td\n(Generated: " . date('d M Y H:i:s') . ") Tj\nET\n";
+        $y -= 20;
+        
+        // Filters
+        $content .= "BT\n/F1 10 Tf\n" . $margin . " " . $y . " Td\n(Filters Applied:) Tj\nET\n";
+        $y -= 12;
+        
+        $filterText = "Report Type: " . ($reportType === 'paid' ? 'Paid Bills Only' : 'All Records');
+        $content .= "BT\n/F1 9 Tf\n" . ($margin + 10) . " " . $y . " Td\n($filterText) Tj\nET\n";
+        $y -= 12;
+        
+        if ($dateFrom || $dateTo) {
+            $filterText = "Date: " . ($dateFrom ?: 'Any') . " to " . ($dateTo ?: 'Any');
+            $content .= "BT\n/F1 9 Tf\n" . ($margin + 10) . " " . $y . " Td\n($filterText) Tj\nET\n";
+            $y -= 12;
+        }
+        
+        if ($priceFrom !== null || $priceTo !== null) {
+            $filterText = "Price: " . ($priceFrom !== null ? number_format($priceFrom, 2) : '0') . " to " . ($priceTo !== null ? number_format($priceTo, 2) : 'Unlimited');
+            $content .= "BT\n/F1 9 Tf\n" . ($margin + 10) . " " . $y . " Td\n($filterText) Tj\nET\n";
+            $y -= 12;
+        }
+        
+        $y -= 10;
+        
+        // Table header
+        $colX = [$margin, $margin + 80, $margin + 180, $margin + 280, $margin + 360, $margin + 440, $margin + 500];
+        $colNames = ['Bill No', 'Date', 'Customer', 'Total', 'Paid', 'Balance', 'Status'];
+        
+        // Header background
+        $content .= "q\n0.8 0.8 0.8 rg\n" . $margin . " " . ($y - 15) . " " . ($pageWidth - 2 * $margin) . " 15 re f\nQ\n";
+        
+        // Header text
+        foreach ($colNames as $i => $name) {
+            $content .= "BT\n/F1 9 Tf\n" . ($colX[$i] + 2) . " " . ($y - 12) . " Td\n($name) Tj\nET\n";
+        }
+        
+        $y -= 20;
+        
+        // Table rows
+        $rowHeight = 12;
+        foreach ($bills as $idx => $bill) {
+            $balance = floatval($bill['total_amount']) - floatval($bill['paid_amount']);
+            $status = $bill['payment_status'] == 'paid' ? 'Paid' : ($bill['payment_status'] == 'partial' ? 'Partial' : 'Pending');
             
-            $statusBadge = $bill['payment_status'] == 'paid' ? 'Paid' : ($bill['payment_status'] == 'partial' ? 'Partial' : 'Pending');
+            // Alternate row background
+            if ($idx % 2 == 0) {
+                $content .= "q\n0.95 0.95 0.95 rg\n" . $margin . " " . ($y - $rowHeight) . " " . ($pageWidth - 2 * $margin) . " " . $rowHeight . " re f\nQ\n";
+            }
             
-            $pdf .= "<tr>
-<td>" . htmlspecialchars($bill['bill_number']) . "</td>
-<td>" . date('d M Y H:i', strtotime($bill['created_at'])) . "</td>
-<td>" . htmlspecialchars($bill['customer_name'] ?? 'Walk-in') . "</td>
-<td class='text-end'>" . htmlspecialchars($settings['currency_symbol'] ?? 'LKR') . " " . number_format($bill['total_amount'], 2) . "</td>
-<td class='text-end'>" . htmlspecialchars($settings['currency_symbol'] ?? 'LKR') . " " . number_format($bill['paid_amount'], 2) . "</td>
-<td class='text-end'>" . htmlspecialchars($settings['currency_symbol'] ?? 'LKR') . " " . number_format($balance, 2) . "</td>
-<td>" . $statusBadge . "</td>
-</tr>";
+            // Row data
+            $rowData = [
+                htmlspecialchars($bill['bill_number']),
+                date('d M Y', strtotime($bill['created_at'])),
+                substr(htmlspecialchars($bill['customer_name'] ?? 'Walk-in'), 0, 15),
+                $settings['currency_symbol'] . ' ' . number_format($bill['total_amount'], 2),
+                $settings['currency_symbol'] . ' ' . number_format($bill['paid_amount'], 2),
+                $settings['currency_symbol'] . ' ' . number_format($balance, 2),
+                $status
+            ];
+            
+            foreach ($rowData as $i => $data) {
+                $align = $i >= 3 && $i <= 5 ? 'R' : 'L';
+                if ($align === 'R') {
+                    $content .= "BT\n/F1 8 Tf\n" . ($colX[$i] + 75) . " " . ($y - 8) . " Td\n" . ($align === 'R' ? '-50' : '2') . " 0 Td\n($data) Tj\nET\n";
+                } else {
+                    $content .= "BT\n/F1 8 Tf\n" . ($colX[$i] + 2) . " " . ($y - 8) . " Td\n($data) Tj\nET\n";
+                }
+            }
+            
+            $y -= $rowHeight;
+            if ($y < $margin + 50) {
+                break;
+            }
         }
         
         // Summary row
-        $pdf .= "<tr style='background-color: #f0f0f0; font-weight: bold;'>
-<td colspan='3'>TOTAL</td>
-<td class='text-end'>" . htmlspecialchars($settings['currency_symbol'] ?? 'LKR') . " " . number_format($totalAmount, 2) . "</td>
-<td class='text-end'>" . htmlspecialchars($settings['currency_symbol'] ?? 'LKR') . " " . number_format($totalPaid, 2) . "</td>
-<td class='text-end'>" . htmlspecialchars($settings['currency_symbol'] ?? 'LKR') . " " . number_format($totalBalance, 2) . "</td>
-<td></td>
-</tr>";
+        $y -= 5;
+        $content .= "q\n0.7 0.7 0.7 rg\n" . $margin . " " . ($y - $rowHeight) . " " . ($pageWidth - 2 * $margin) . " " . $rowHeight . " re f\nQ\n";
         
-        $pdf .= "</tbody>
-</table>
-<div class='footer'>
-<p>This is a computer-generated report. " . htmlspecialchars($settings['company_name'] ?? 'Sri Ram Fire Works') . "</p>
-</div>
-</body>
-</html>";
+        $content .= "BT\n/F1 9 Tf\n" . ($margin + 2) . " " . ($y - 8) . " Td\n(TOTAL) Tj\nET\n";
+        $content .= "BT\n/F1 9 Tf\n" . ($colX[3] + 75) . " " . ($y - 8) . " Td\n-50 0 Td\n(" . $settings['currency_symbol'] . ' ' . number_format($totalAmount, 2) . ") Tj\nET\n";
+        $content .= "BT\n/F1 9 Tf\n" . ($colX[4] + 75) . " " . ($y - 8) . " Td\n-50 0 Td\n(" . $settings['currency_symbol'] . ' ' . number_format($totalPaid, 2) . ") Tj\nET\n";
+        $content .= "BT\n/F1 9 Tf\n" . ($colX[5] + 75) . " " . ($y - 8) . " Td\n-50 0 Td\n(" . $settings['currency_symbol'] . ' ' . number_format($totalBalance, 2) . ") Tj\nET\n";
         
-        // Output as HTML (browser will handle printing/saving as PDF)
-        header('Content-Type: text/html; charset=utf-8');
-        header('Content-Disposition: attachment; filename="retail_bills_' . date('Y-m-d_H-i-s') . '.html"');
+        // Fonts
+        $pdf .= "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /MediaBox [0 0 595 842] /Contents 5 0 R >>\nendobj\n";
+        $pdf .= "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+        $pdf .= "5 0 obj\n<< /Length " . strlen($content) . " >>\nstream\n" . $content . "endstream\nendobj\n";
+        
+        $xref = strlen($pdf);
+        $pdf .= "xref\n0 6\n0000000000 65535 f\n";
+        $pdf .= "0000000009 00000 n\n";
+        $pdf .= "0000000058 00000 n\n";
+        $pdf .= "0000000115 00000 n\n";
+        $pdf .= "0000" . str_pad(strlen($pdf) - strlen($content) - 100, 5, '0', STR_PAD_LEFT) . " 00000 n\n";
+        $pdf .= "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n$xref\n%%EOF";
+        
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: attachment; filename="retail_bills_' . date('Y-m-d_H-i-s') . '.pdf"');
+        header('Content-Length: ' . strlen($pdf));
         echo $pdf;
         exit;
     }
@@ -204,42 +235,48 @@ include 'header.php';
                 <i class="bi bi-download me-2"></i>Download Report
             </button>
             <div class="dropdown-menu dropdown-menu-end p-3" style="min-width: 360px;">
-                <form method="GET" action="?page=retail&action=download">
+                <form method="GET" action="?page=retail&action=download" id="reportFilterForm">
+                    <input type="hidden" name="page" value="retail">
+                    <input type="hidden" name="action" value="download">
+                    
                     <div class="mb-3">
-                        <label class="form-label mb-2">Report Types</label>
+                        <label class="form-label mb-2">Report Type</label>
                         <div class="border rounded p-2">
-                            <div class="form-check mb-1">
-                                <input class="form-check-input" type="checkbox" id="rf_all" name="report_type[]" value="all" checked>
-                                <label class="form-check-label" for="rf_all">All Records</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" id="rt_all" name="report_type" value="all" checked>
+                                <label class="form-check-label" for="rt_all">All Records</label>
                             </div>
                             <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="rf_paid" name="report_type[]" value="paid">
-                                <label class="form-check-label" for="rf_paid">Paid Bills Only</label>
+                                <input class="form-check-input" type="radio" id="rt_paid" name="report_type" value="paid">
+                                <label class="form-check-label" for="rt_paid">Paid Bills Only</label>
                             </div>
                         </div>
                     </div>
+                    
                     <div class="mb-3">
                         <label class="form-label mb-2">Date Range</label>
                         <div class="row g-2">
                             <div class="col-6">
-                                <input type="date" name="date_from" class="form-control form-control-sm" placeholder="From">
+                                <input type="date" name="date_from" class="form-control form-control-sm" placeholder="From Date">
                             </div>
                             <div class="col-6">
-                                <input type="date" name="date_to" class="form-control form-control-sm" placeholder="To">
+                                <input type="date" name="date_to" class="form-control form-control-sm" placeholder="To Date">
                             </div>
                         </div>
                     </div>
+                    
                     <div class="mb-3">
-                        <label class="form-label mb-2">Price Range</label>
+                        <label class="form-label mb-2">Price Range (<?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?>)</label>
                         <div class="row g-2">
                             <div class="col-6">
-                                <input type="number" name="price_from" class="form-control form-control-sm" placeholder="Min" step="0.01">
+                                <input type="number" name="price_from" class="form-control form-control-sm" placeholder="Min Price" step="0.01" min="0">
                             </div>
                             <div class="col-6">
-                                <input type="number" name="price_to" class="form-control form-control-sm" placeholder="Max" step="0.01">
+                                <input type="number" name="price_to" class="form-control form-control-sm" placeholder="Max Price" step="0.01" min="0">
                             </div>
                         </div>
                     </div>
+                    
                     <button type="submit" class="btn btn-primary btn-sm w-100"><i class="bi bi-file-earmark-pdf me-2"></i>Download PDF</button>
                 </form>
             </div>
