@@ -74,6 +74,7 @@ $showReportButton = in_array($page, ['retail', 'event', 'products', 'suppliers',
     </div>
     
     <div class="main-content">
+        <?php if (!in_array($page, ['retail', 'event', 'products', 'categories', 'customers', 'suppliers', 'employees'])): ?>
         <div class="top-bar d-flex justify-content-between align-items-center">
             <h5 class="mb-0"><?= htmlspecialchars($currentPageTitle) ?></h5>
             <div class="d-flex align-items-center gap-3">
@@ -84,3 +85,4 @@ $showReportButton = in_array($page, ['retail', 'event', 'products', 'suppliers',
                 <span class="badge bg-primary"><?= ucfirst($_SESSION['user_role'] ?? 'admin') ?></span>
             </div>
         </div>
+        <?php endif; ?>
