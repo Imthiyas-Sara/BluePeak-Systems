@@ -46,11 +46,11 @@ include 'header.php';
 
 <?php if ($action === 'index'): ?>
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <div class="d-flex align-items-center gap-2">
+    <h4 class="mb-0"><i class="bi bi-tags me-2"></i>Categories</h4>
+    <div class="d-flex gap-2">
         <a href="?page=products" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
-        <h4 class="mb-0"><i class="bi bi-tags me-2"></i>Categories</h4>
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCategoryModal"><i class="bi bi-plus-lg me-2"></i>Add Category</button>
     </div>
-    <button class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#addCategoryModal"><i class="bi bi-plus-lg me-2"></i>Add Category</button>
 </div>
 
 <div class="row">
