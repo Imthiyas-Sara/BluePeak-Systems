@@ -13,6 +13,277 @@ if (isset($_SESSION['flash_error'])) {
     unset($_SESSION['flash_error']);
 }
 
+$buildMonthlySalaryData = function ($month, $includeInactive = false) use ($pdo) {
+    $year = date('Y', strtotime($month . '-01'));
+    $month_num = date('m', strtotime($month . '-01'));
+
+    $first_day = strtotime($year . '-' . $month_num . '-01');
+    $last_day = strtotime(date('Y-m-t', $first_day));
+    $working_days = 0;
+    for ($date = $first_day; $date <= $last_day; $date = strtotime('+1 day', $date)) {
+        $day_of_week = date('N', $date);
+        if ($day_of_week <= 5) {
+            $working_days++;
+        }
+    }
+
+    $stmt = $pdo->prepare("SELECT employee_id, status FROM salary_payments WHERE month = ?");
+    $stmt->execute([$month]);
+    $paymentStatuses = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
+    $employeeQuery = "SELECT * FROM employees";
+    if (!$includeInactive) {
+        $employeeQuery .= " WHERE is_active = 1";
+    }
+    $employeeQuery .= " ORDER BY name ASC";
+
+    $stmt = $pdo->query($employeeQuery);
+    $employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $salaryData = [];
+    foreach ($employees as $employee) {
+        $rawType = strtolower(trim($employee['employee_type'] ?? ''));
+        if ($rawType === '') {
+            if ((float)($employee['monthly_salary'] ?? 0) > 0) {
+                $employee_type = 'monthly_paid';
+            } elseif ((float)($employee['daily_wage'] ?? 0) > 0) {
+                $employee_type = 'daily_paid';
+            } else {
+                $employee_type = 'daily_paid';
+            }
+        } elseif (strpos($rawType, 'month') !== false) {
+            $employee_type = 'monthly_paid';
+        } elseif (strpos($rawType, 'day') !== false) {
+            $employee_type = 'daily_paid';
+        } else {
+            $employee_type = ($rawType === 'monthly_paid') ? 'monthly_paid' : 'daily_paid';
+        }
+
+        $stmt = $pdo->prepare("SELECT COUNT(*) as present_count FROM attendance WHERE employee_id = ? AND attendance_date LIKE ? AND status = 'present'");
+        $stmt->execute([$employee['id'], $year . '-' . $month_num . '-%']);
+        $present_days = (int)($stmt->fetch(PDO::FETCH_ASSOC)['present_count'] ?? 0);
+
+        $final_salary = 0;
+        $salary_type_label = '';
+        if ($employee_type === 'daily_paid') {
+            $daily_rate = (float)($employee['daily_wage'] ?? 0);
+            $final_salary = $daily_rate * $present_days;
+            $salary_type_label = 'Daily Rate: LKR ' . number_format($daily_rate, 2);
+        } else {
+            $monthly_salary = (float)($employee['monthly_salary'] ?? 0);
+            if ($monthly_salary > 0 && $working_days > 0) {
+                $per_day_salary = $monthly_salary / $working_days;
+                $final_salary = $per_day_salary * $present_days;
+            }
+            $salary_type_label = 'Monthly Salary: LKR ' . number_format($monthly_salary, 2);
+        }
+
+        $salaryData[] = [
+            'id' => $employee['id'],
+            'uid' => $employee['uid'] ?? 'N/A',
+            'name' => $employee['name'] ?? 'N/A',
+            'type' => $employee_type,
+            'phone' => $employee['phone'] ?? 'N/A',
+            'is_active' => (int)($employee['is_active'] ?? 1),
+            'created_at' => $employee['created_at'] ?? null,
+            'updated_at' => $employee['updated_at'] ?? null,
+            'present_days' => $present_days,
+            'total_working_days' => $working_days,
+            'salary_type_label' => $salary_type_label,
+            'final_salary' => number_format($final_salary, 2, '.', ''),
+            'payment_status' => $paymentStatuses[$employee['id']] ?? 'pending'
+        ];
+    }
+
+    return [
+        'salaryData' => $salaryData,
+        'workingDays' => $working_days,
+    ];
+};
+
+$requestAction = $_GET['action'] ?? '';
+if ($requestAction === 'download_salary_report') {
+    $month = $_GET['month'] ?? date('Y-m');
+    $format = strtolower($_GET['format'] ?? 'pdf');
+    if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
+        $month = date('Y-m');
+    }
+
+    $reportData = $buildMonthlySalaryData($month, true);
+    $salaryData = $reportData['salaryData'];
+
+    if ($format === 'csv') {
+        $filename = 'employee-salary-report-' . $month . '.csv';
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename=' . $filename);
+        $out = fopen('php://output', 'w');
+        fputcsv($out, ['Employee UID', 'Employee Name', 'Employee Type', 'Calculated Salary', 'Payment Status']);
+        foreach ($salaryData as $row) {
+            fputcsv($out, [
+                $row['uid'],
+                $row['name'],
+                $row['type'] === 'daily_paid' ? 'Daily Paid' : 'Monthly Paid',
+                'LKR ' . number_format((float)$row['final_salary'], 2),
+                ucfirst($row['payment_status'])
+            ]);
+        }
+        fclose($out);
+        exit;
+    }
+
+    $monthStart = $month . '-01';
+    $monthEnd = date('Y-m-t', strtotime($monthStart));
+
+    $totalEmployees = count($salaryData);
+    $newEmployees = 0;
+    $employeesLeft = 0;
+    $paidEmployees = 0;
+    $pendingEmployees = 0;
+    $totalSalaryPaid = 0.0;
+    $totalSalaryPending = 0.0;
+
+    foreach ($salaryData as $row) {
+        if (!empty($row['created_at'])) {
+            $created = substr((string)$row['created_at'], 0, 10);
+            if ($created >= $monthStart && $created <= $monthEnd) {
+                $newEmployees++;
+            }
+        }
+
+        if ((int)($row['is_active'] ?? 1) === 0 && !empty($row['updated_at'])) {
+            $updated = substr((string)$row['updated_at'], 0, 10);
+            if ($updated >= $monthStart && $updated <= $monthEnd) {
+                $employeesLeft++;
+            }
+        }
+
+        $salaryAmount = (float)($row['final_salary'] ?? 0);
+        if (($row['payment_status'] ?? 'pending') === 'paid') {
+            $paidEmployees++;
+            $totalSalaryPaid += $salaryAmount;
+        } else {
+            $pendingEmployees++;
+            $totalSalaryPending += $salaryAmount;
+        }
+    }
+
+    $pdfEscape = function ($text) {
+        $text = (string)$text;
+        $text = str_replace('\\', '\\\\', $text);
+        $text = str_replace('(', '\\(', $text);
+        $text = str_replace(')', '\\)', $text);
+        $text = str_replace(["\r", "\n", "\t"], ' ', $text);
+        return $text;
+    };
+
+    $drawText = function ($x, $y, $text, $size = 10, $font = '/F1') use ($pdfEscape) {
+        return "BT\n{$font} {$size} Tf\n1 0 0 1 {$x} {$y} Tm (" . $pdfEscape($text) . ") Tj\nET\n";
+    };
+
+    $lines = [];
+    $lines[] = ['text' => 'EMPLOYEE MONTHLY PAYROLL REPORT', 'size' => 14, 'font' => '/F2'];
+    $lines[] = ['text' => 'Month: ' . $month . '    Generated: ' . date('Y-m-d H:i:s'), 'size' => 9, 'font' => '/F1'];
+    $lines[] = ['text' => str_repeat('-', 110), 'size' => 8, 'font' => '/F1'];
+
+    $lines[] = ['text' => 'SECTION A - EMPLOYEE DETAILS', 'size' => 11, 'font' => '/F2'];
+    $lines[] = ['text' => 'UID        Name                          Type      Phone         Status', 'size' => 9, 'font' => '/F2'];
+    foreach ($salaryData as $row) {
+        $uid = str_pad(substr((string)$row['uid'], 0, 10), 10);
+        $name = str_pad(substr((string)$row['name'], 0, 28), 30);
+        $typeLabel = (($row['type'] ?? 'daily_paid') === 'daily_paid') ? 'Daily' : 'Monthly';
+        $type = str_pad($typeLabel, 9);
+        $phone = str_pad(substr((string)($row['phone'] ?? 'N/A'), 0, 12), 12);
+        $status = ((int)($row['is_active'] ?? 1) === 1) ? 'Active' : 'Inactive';
+        $lines[] = ['text' => $uid . '  ' . $name . '  ' . $type . '  ' . $phone . '  ' . $status, 'size' => 8, 'font' => '/F3'];
+    }
+
+    $lines[] = ['text' => ' ', 'size' => 8, 'font' => '/F1'];
+    $lines[] = ['text' => 'SECTION B - ATTENDANCE & SALARY DETAILS', 'size' => 11, 'font' => '/F2'];
+    $lines[] = ['text' => 'UID        Present/Work   Salary Type                    Final Salary      Payment', 'size' => 9, 'font' => '/F2'];
+    foreach ($salaryData as $row) {
+        $uid = str_pad(substr((string)$row['uid'], 0, 10), 10);
+        $attendance = str_pad((string)$row['present_days'] . '/' . (string)$row['total_working_days'], 13);
+        $salaryType = str_pad(substr((string)$row['salary_type_label'], 0, 30), 30);
+        $finalSalary = str_pad('LKR ' . number_format((float)$row['final_salary'], 2), 15);
+        $payment = ucfirst((string)($row['payment_status'] ?? 'pending'));
+        $lines[] = ['text' => $uid . '  ' . $attendance . '  ' . $salaryType . '  ' . $finalSalary . '  ' . $payment, 'size' => 8, 'font' => '/F3'];
+    }
+
+    $lines[] = ['text' => ' ', 'size' => 8, 'font' => '/F1'];
+    $lines[] = ['text' => 'SECTION C - MONTHLY SUMMARY', 'size' => 11, 'font' => '/F2'];
+    $lines[] = ['text' => 'Total Employees             : ' . $totalEmployees, 'size' => 9, 'font' => '/F1'];
+    $lines[] = ['text' => 'New Employees Joined        : ' . $newEmployees, 'size' => 9, 'font' => '/F1'];
+    $lines[] = ['text' => 'Employees Who Left          : ' . $employeesLeft, 'size' => 9, 'font' => '/F1'];
+    $lines[] = ['text' => 'Number of Paid Employees    : ' . $paidEmployees, 'size' => 9, 'font' => '/F1'];
+    $lines[] = ['text' => 'Number of Pending Payments  : ' . $pendingEmployees, 'size' => 9, 'font' => '/F1'];
+    $lines[] = ['text' => 'Total Salary Paid           : LKR ' . number_format($totalSalaryPaid, 2), 'size' => 9, 'font' => '/F1'];
+    $lines[] = ['text' => 'Total Salary Pending        : LKR ' . number_format($totalSalaryPending, 2), 'size' => 9, 'font' => '/F1'];
+
+    $linesPerPage = 52;
+    $linePages = array_chunk($lines, $linesPerPage);
+    if (empty($linePages)) {
+        $linePages = [[]];
+    }
+
+    $objects = [];
+    $objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+    $objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+    $objects[4] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>';
+    $objects[5] = '<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>';
+
+    $pageRefs = [];
+    $nextObj = 6;
+
+    foreach ($linePages as $pageIndex => $pageLines) {
+        $pageObj = $nextObj++;
+        $contentObj = $nextObj++;
+        $pageRefs[] = $pageObj . ' 0 R';
+
+        $content = '';
+        $y = 805;
+        foreach ($pageLines as $line) {
+            $content .= $drawText(40, $y, $line['text'], $line['size'], $line['font']);
+            $y -= 13;
+        }
+
+        $content .= $drawText(40, 30, 'Page ' . ($pageIndex + 1) . ' of ' . count($linePages), 8, '/F1');
+
+        $objects[$contentObj] = "<< /Length " . strlen($content) . " >>\nstream\n" . $content . "\nendstream";
+        $objects[$pageObj] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents ' . $contentObj . ' 0 R >>';
+    }
+
+    $objects[2] = '<< /Type /Pages /Kids [' . implode(' ', $pageRefs) . '] /Count ' . count($pageRefs) . ' >>';
+    ksort($objects);
+
+    $maxObj = max(array_keys($objects));
+    $pdf = "%PDF-1.4\n";
+    $offsets = [];
+    for ($i = 1; $i <= $maxObj; $i++) {
+        if (!isset($objects[$i])) {
+            continue;
+        }
+        $offsets[$i] = strlen($pdf);
+        $pdf .= $i . " 0 obj\n" . $objects[$i] . "\nendobj\n";
+    }
+
+    $xrefOffset = strlen($pdf);
+    $pdf .= "xref\n0 " . ($maxObj + 1) . "\n";
+    $pdf .= "0000000000 65535 f \n";
+    for ($i = 1; $i <= $maxObj; $i++) {
+        $off = $offsets[$i] ?? 0;
+        $pdf .= sprintf('%010d 00000 n ', $off) . "\n";
+    }
+    $pdf .= "trailer\n<< /Size " . ($maxObj + 1) . " /Root 1 0 R >>\n";
+    $pdf .= "startxref\n" . $xrefOffset . "\n%%EOF";
+
+    $filename = 'employee-monthly-payroll-report-' . $month . '.pdf';
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: attachment; filename=' . $filename);
+    header('Content-Length: ' . strlen($pdf));
+    echo $pdf;
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Handle JSON requests
     $contentType = isset($_SERVER["CONTENT_TYPE"]) ? trim($_SERVER["CONTENT_TYPE"]) : '';
@@ -220,83 +491,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => false, 'message' => 'Month not specified']);
                 exit;
             }
-            
+
             try {
-                $year = date('Y', strtotime($month . '-01'));
-                $month_num = date('m', strtotime($month . '-01'));
-
-                // Calculate working days in month (Mon-Fri)
-                $first_day = strtotime($year . '-' . $month_num . '-01');
-                $last_day = strtotime(date('Y-m-t', $first_day));
-                $working_days = 0;
-                for ($date = $first_day; $date <= $last_day; $date = strtotime('+1 day', $date)) {
-                    $day_of_week = date('N', $date);
-                    if ($day_of_week <= 5) {
-                        $working_days++;
-                    }
-                }
-
-                // Fetch salary status
-                $stmt = $pdo->prepare("SELECT employee_id, status FROM salary_payments WHERE month = ?");
-                $stmt->execute([$month]);
-                $paymentStatuses = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-
-                // Get all employees
-                $stmt = $pdo->query("SELECT * FROM employees ORDER BY name ASC");
-                $all_employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                $salaryData = [];
-                foreach ($all_employees as $employee) {
-                    $rawType = strtolower(trim($employee['employee_type'] ?? ''));
-                    if ($rawType === '') {
-                        if ((float)($employee['monthly_salary'] ?? 0) > 0) {
-                            $employee_type = 'monthly_paid';
-                        } elseif ((float)($employee['daily_wage'] ?? 0) > 0) {
-                            $employee_type = 'daily_paid';
-                        } else {
-                            $employee_type = 'daily_paid';
-                        }
-                    } elseif (strpos($rawType, 'month') !== false) {
-                        $employee_type = 'monthly_paid';
-                    } elseif (strpos($rawType, 'day') !== false) {
-                        $employee_type = 'daily_paid';
-                    } else {
-                        $employee_type = ($rawType === 'monthly_paid') ? 'monthly_paid' : 'daily_paid';
-                    }
-
-                    $stmt = $pdo->prepare("SELECT COUNT(*) as present_count FROM attendance WHERE employee_id = ? AND attendance_date LIKE ? AND status = 'present'");
-                    $stmt->execute([$employee['id'], $year . '-' . $month_num . '-%']);
-                    $present_days = $stmt->fetch(PDO::FETCH_ASSOC)['present_count'];
-
-                    $final_salary = 0;
-                    $salary_info = '';
-                    if ($employee_type === 'daily_paid') {
-                        $daily_rate = (float)($employee['daily_wage'] ?? 0);
-                        $final_salary = $daily_rate * $present_days;
-                        $salary_info = 'LKR ' . number_format($daily_rate, 2) . ' / day';
-                    } else {
-                        $monthly_salary = (float)($employee['monthly_salary'] ?? 0);
-                        if ($monthly_salary > 0 && $working_days > 0) {
-                            $per_day_salary = $monthly_salary / $working_days;
-                            $final_salary = $per_day_salary * $present_days;
-                        }
-                        $salary_info = 'LKR ' . number_format($monthly_salary, 2) . ' / month';
-                    }
-
-                    $salaryData[] = [
-                        'id' => $employee['id'],
-                        'uid' => $employee['uid'],
-                        'name' => $employee['name'],
-                        'type' => $employee_type,
-                        'salary_info' => $salary_info,
-                        'present_days' => $present_days,
-                        'total_working_days' => $working_days,
-                        'final_salary' => number_format($final_salary, 2, '.', ''),
-                        'payment_status' => $paymentStatuses[$employee['id']] ?? 'pending'
-                    ];
-                }
-
-                echo json_encode(['success' => true, 'salaryData' => $salaryData]);
+                $reportData = $buildMonthlySalaryData($month);
+                echo json_encode(['success' => true, 'salaryData' => $reportData['salaryData']]);
             } catch (Exception $e) {
                 echo json_encode(['success' => false, 'message' => 'Error loading salary data: ' . $e->getMessage()]);
             }
@@ -318,6 +516,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => true]);
             } catch (Exception $e) {
                 echo json_encode(['success' => false, 'message' => 'Error updating payment status: ' . $e->getMessage()]);
+            }
+            exit;
+        } elseif ($_POST['action'] === 'update_single_attendance') {
+            $employeeId = $_POST['employee_id'] ?? '';
+            $attendanceDate = $_POST['attendance_date'] ?? '';
+            $status = $_POST['status'] ?? '';
+
+            if (!$employeeId || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $attendanceDate) || !in_array($status, ['present', 'absent'])) {
+                echo json_encode(['success' => false, 'message' => 'Invalid request']);
+                exit;
+            }
+
+            try {
+                $stmt = $pdo->prepare("SELECT id FROM employees WHERE id = ?");
+                $stmt->execute([$employeeId]);
+                if (!$stmt->fetch()) {
+                    echo json_encode(['success' => false, 'message' => 'Employee not found']);
+                    exit;
+                }
+
+                $stmt = $pdo->prepare("INSERT INTO attendance (employee_id, attendance_date, status) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE status = VALUES(status)");
+                $stmt->execute([$employeeId, $attendanceDate, $status]);
+
+                echo json_encode(['success' => true, 'message' => 'Attendance updated successfully']);
+            } catch (Exception $e) {
+                echo json_encode(['success' => false, 'message' => 'Error updating attendance: ' . $e->getMessage()]);
             }
             exit;
         }elseif ($_POST['action'] === 'load_attendance') {
@@ -580,7 +804,7 @@ if ($editEmployeeId) {
             </table>
         </div>
         <div class="text-end mt-4">
-            <button class="btn btn-primary" onclick="window.print()"><i class="bi bi-download me-2"></i>Download Report</button>
+            <button class="btn btn-primary" onclick="downloadSalaryReport('pdf')"><i class="bi bi-download me-2"></i>Download Report</button>
         </div>
     </div>
 </div>
@@ -782,6 +1006,89 @@ if ($editEmployeeId) {
     </div>
 </div>
 
+<!-- View Employee Salary Modal -->
+<div class="modal fade" id="salaryModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">View Employee Salary</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row mb-3">
+                    <div class="col-md-4">
+                        <label for="salaryMonth" class="form-label">Select Month</label>
+                        <input type="month" class="form-control" id="salaryMonth" value="<?= date('Y-m') ?>">
+                    </div>
+                    <div class="col-md-4">
+                        <label for="salarySearch" class="form-label">Search Employee</label>
+                        <input type="text" class="form-control" id="salarySearch" placeholder="Search by UID or name...">
+                    </div>
+                    <div class="col-md-4 d-flex align-items-end">
+                        <button type="button" class="btn btn-primary me-2" onclick="loadSalaryData()">Load Salaries</button>
+                        <button type="button" class="btn btn-success me-2" onclick="downloadSalaryReport('pdf')">Generate Report</button>
+                        <button type="button" class="btn btn-outline-primary" onclick="downloadSalaryReport('csv')">CSV</button>
+                    </div>
+                </div>
+
+                <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+                    <table class="table table-hover align-middle" id="salaryTable">
+                        <thead class="table-light sticky-top">
+                            <tr>
+                                <th>Employee UID</th>
+                                <th>Employee Name</th>
+                                <th>Employee Type</th>
+                                <th>Calculated Salary</th>
+                                <th>Action</th>
+                                <th>Payment Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="salaryTableBody">
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">Select month and click Load Salaries</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Attendance (Single Employee) Modal -->
+<div class="modal fade" id="attendanceEditModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Attendance</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="attendanceEditEmployeeId">
+                <div class="mb-3">
+                    <label class="form-label">Employee</label>
+                    <input type="text" id="attendanceEditEmployeeLabel" class="form-control" readonly>
+                </div>
+                <div class="mb-3">
+                    <label for="attendanceEditDate" class="form-label">Date</label>
+                    <input type="date" id="attendanceEditDate" class="form-control" value="<?= date('Y-m-d') ?>">
+                </div>
+                <div class="mb-3">
+                    <label for="attendanceEditStatus" class="form-label">Status</label>
+                    <select id="attendanceEditStatus" class="form-select">
+                        <option value="present">Present</option>
+                        <option value="absent">Absent</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveAttendanceEdit()">Update Attendance</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- View Employee Details Modal -->
 <div class="modal fade" id="viewDetailsModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -937,6 +1244,182 @@ if ($editEmployeeId) {
 let deleteEmployeeId = null;
 let employeeData = <?= json_encode($employees) ?>;
 let allEmployeeData = <?= json_encode($allEmployees) ?>;
+let salaryDataCache = [];
+
+function loadSalaryData() {
+    const month = document.getElementById('salaryMonth').value;
+    if (!month) {
+        alert('Please select a month');
+        return;
+    }
+
+    const tbody = document.getElementById('salaryTableBody');
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center">Loading salary details...</td></tr>';
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'load_salary_data',
+            month: month
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">' + (data.message || 'Failed to load salary data') + '</td></tr>';
+            return;
+        }
+
+        salaryDataCache = data.salaryData || [];
+        renderSalaryTable();
+    })
+    .catch(error => {
+        console.error('Error loading salary data:', error);
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">Error loading salary data</td></tr>';
+    });
+}
+
+function renderSalaryTable() {
+    const tbody = document.getElementById('salaryTableBody');
+    const query = (document.getElementById('salarySearch').value || '').toLowerCase().trim();
+
+    const filtered = salaryDataCache.filter(emp => {
+        const uid = (emp.uid || '').toLowerCase();
+        const name = (emp.name || '').toLowerCase();
+        return uid.includes(query) || name.includes(query);
+    });
+
+    if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No employees found for selected month/filter</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = filtered.map(emp => {
+        const typeLabel = emp.type === 'daily_paid' ? 'Daily Paid' : 'Monthly Paid';
+        const typeBadge = emp.type === 'daily_paid' ? 'bg-warning' : 'bg-info';
+        const status = emp.payment_status === 'paid' ? 'paid' : 'pending';
+        return `
+            <tr>
+                <td><strong>${emp.uid || 'N/A'}</strong></td>
+                <td>${emp.name || 'N/A'}</td>
+                <td><span class="badge ${typeBadge}">${typeLabel}</span></td>
+                <td><strong>LKR ${parseFloat(emp.final_salary || 0).toFixed(2)}</strong></td>
+                <td>
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="openAttendanceEdit(${emp.id}, '${String(emp.uid || '').replace(/'/g, "\\'")}', '${String(emp.name || '').replace(/'/g, "\\'")}')">
+                        <i class="bi bi-pencil-square me-1"></i>Edit Attendance
+                    </button>
+                </td>
+                <td>
+                    <select class="form-select form-select-sm" onchange="updateSalaryPaymentStatus(${emp.id}, this.value)">
+                        <option value="pending" ${status === 'pending' ? 'selected' : ''}>Pending</option>
+                        <option value="paid" ${status === 'paid' ? 'selected' : ''}>Paid</option>
+                    </select>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function updateSalaryPaymentStatus(employeeId, status) {
+    const month = document.getElementById('salaryMonth').value;
+    if (!month) {
+        alert('Please select a month');
+        return;
+    }
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'set_payment_status',
+            employee_id: employeeId,
+            month: month,
+            status: status
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'Failed to update payment status');
+            return;
+        }
+
+        const idx = salaryDataCache.findIndex(e => String(e.id) === String(employeeId));
+        if (idx >= 0) {
+            salaryDataCache[idx].payment_status = status;
+        }
+    })
+    .catch(error => {
+        console.error('Error updating payment status:', error);
+        alert('Error updating payment status');
+    });
+}
+
+function openAttendanceEdit(employeeId, uid, name) {
+    document.getElementById('attendanceEditEmployeeId').value = employeeId;
+    document.getElementById('attendanceEditEmployeeLabel').value = `${uid} - ${name}`;
+    document.getElementById('attendanceEditDate').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('attendanceEditStatus').value = 'present';
+    const modal = new bootstrap.Modal(document.getElementById('attendanceEditModal'));
+    modal.show();
+}
+
+function saveAttendanceEdit() {
+    const employeeId = document.getElementById('attendanceEditEmployeeId').value;
+    const attendanceDate = document.getElementById('attendanceEditDate').value;
+    const status = document.getElementById('attendanceEditStatus').value;
+
+    if (!employeeId || !attendanceDate) {
+        alert('Employee and date are required');
+        return;
+    }
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'update_single_attendance',
+            employee_id: employeeId,
+            attendance_date: attendanceDate,
+            status: status
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'Failed to update attendance');
+            return;
+        }
+
+        const modalEl = document.getElementById('attendanceEditModal');
+        const modalInstance = bootstrap.Modal.getInstance(modalEl);
+        if (modalInstance) {
+            modalInstance.hide();
+        }
+
+        loadSalaryData();
+    })
+    .catch(error => {
+        console.error('Error updating attendance:', error);
+        alert('Error updating attendance');
+    });
+}
+
+function downloadSalaryReport(format) {
+    const month = document.getElementById('salaryMonth').value;
+    if (!month) {
+        alert('Please select a month');
+        return;
+    }
+    window.open(`?page=employees&action=download_salary_report&month=${encodeURIComponent(month)}&format=${encodeURIComponent(format)}`, '_blank');
+}
 
 function resetForm() {
     document.getElementById('employeeForm').reset();
@@ -1194,6 +1677,20 @@ document.getElementById('reportSearch').addEventListener('input', function() {
         const visible = name.includes(query) || uid.includes(query);
         row.style.display = visible ? '' : 'none';
     });
+});
+
+document.getElementById('salarySearch').addEventListener('input', function() {
+    renderSalaryTable();
+});
+
+document.getElementById('salaryMonth').addEventListener('change', function() {
+    if (salaryDataCache.length > 0) {
+        loadSalaryData();
+    }
+});
+
+document.getElementById('salaryModal').addEventListener('shown.bs.modal', function() {
+    loadSalaryData();
 });
 
 // Generate monthly report

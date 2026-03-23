@@ -3,7 +3,10 @@ $action = $_GET['action'] ?? 'index';
 $currency = $settings['currency_symbol'] ?? 'LKR';
 
 if ($action === 'download') {
-    $reportType = (isset($_GET['report_type']) && $_GET['report_type'] === 'paid') ? 'paid' : 'all';
+    $filterMode = $_GET['filter_mode'] ?? 'all';
+    if (!in_array($filterMode, ['all', 'date', 'price'], true)) {
+        $filterMode = 'all';
+    }
     $dateFrom = isset($_GET['date_from']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['date_from']) ? $_GET['date_from'] : '';
     $dateTo = isset($_GET['date_to']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['date_to']) ? $_GET['date_to'] : '';
     $priceFrom = (isset($_GET['price_from']) && $_GET['price_from'] !== '') ? max(0, floatval($_GET['price_from'])) : null;
@@ -12,24 +15,25 @@ if ($action === 'download') {
     $query = "SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail'";
     $params = [];
 
-    if ($reportType === 'paid') {
-        $query .= " AND b.payment_status = 'paid'";
+    if ($filterMode === 'date') {
+        if ($dateFrom !== '') {
+            $query .= " AND DATE(b.created_at) >= ?";
+            $params[] = $dateFrom;
+        }
+        if ($dateTo !== '') {
+            $query .= " AND DATE(b.created_at) <= ?";
+            $params[] = $dateTo;
+        }
     }
-    if ($dateFrom !== '') {
-        $query .= " AND DATE(b.created_at) >= ?";
-        $params[] = $dateFrom;
-    }
-    if ($dateTo !== '') {
-        $query .= " AND DATE(b.created_at) <= ?";
-        $params[] = $dateTo;
-    }
-    if ($priceFrom !== null) {
-        $query .= " AND b.total_amount >= ?";
-        $params[] = $priceFrom;
-    }
-    if ($priceTo !== null) {
-        $query .= " AND b.total_amount <= ?";
-        $params[] = $priceTo;
+    if ($filterMode === 'price') {
+        if ($priceFrom !== null) {
+            $query .= " AND b.total_amount >= ?";
+            $params[] = $priceFrom;
+        }
+        if ($priceTo !== null) {
+            $query .= " AND b.total_amount <= ?";
+            $params[] = $priceTo;
+        }
     }
     $query .= " ORDER BY b.created_at DESC LIMIT 1000";
 
@@ -252,8 +256,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'store') {
         $customer_id = $_POST['customer_id'] ?: null;
         $items = $_POST['items'] ?? [];
-        $discount = floatval($_POST['discount_amount'] ?? 0);
-        $paid = 0;
+        $discountPercent = floatval($_POST['discount_percentage'] ?? ($_POST['discount_amount'] ?? 0));
+        $paid = floatval($_POST['paid_amount'] ?? 0);
         $payment_method = 'cash';
         
         if (!empty($items)) {
@@ -261,10 +265,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($items as $item) {
                 $subtotal += ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
             }
+            $discountPercent = max(0, min($discountPercent, 100));
+            $discount = ($subtotal * $discountPercent) / 100;
             $tax = ($subtotal - $discount) * (floatval($settings['tax_percentage'] ?? 0) / 100);
             $total = $subtotal - $discount + $tax;
-            $paid = $total;
-            $status = 'paid';
+            $paid = max(0, $paid);
+            $status = 'pending';
+            if ($paid >= $total && $total > 0) {
+                $status = 'paid';
+            } elseif ($paid > 0 && $paid < $total) {
+                $status = 'partial';
+            }
             
             $lastBill = $pdo->query("SELECT bill_number FROM bills WHERE type = 'retail' ORDER BY id DESC LIMIT 1")->fetch();
             $nextNum = $lastBill ? intval(substr($lastBill['bill_number'], -6)) + 1 : 1;
@@ -293,6 +304,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error = "Error: " . $e->getMessage();
             }
         }
+    } elseif ($action === 'update') {
+        $id = intval($_GET['id'] ?? 0);
+        $customer_id = $_POST['customer_id'] ?: null;
+        $items = $_POST['items'] ?? [];
+        $discountPercent = floatval($_POST['discount_percentage'] ?? ($_POST['discount_amount'] ?? 0));
+        $paid = floatval($_POST['paid_amount'] ?? 0);
+        $payment_method = 'cash';
+
+        if ($id > 0 && !empty($items)) {
+            $existingBillStmt = $pdo->prepare("SELECT id FROM bills WHERE id = ? AND type = 'retail'");
+            $existingBillStmt->execute([$id]);
+            $existingBill = $existingBillStmt->fetch();
+
+            if ($existingBill) {
+                $subtotal = 0;
+                foreach ($items as $item) {
+                    $subtotal += ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
+                }
+
+                $discountPercent = max(0, min($discountPercent, 100));
+                $discount = ($subtotal * $discountPercent) / 100;
+                $tax = ($subtotal - $discount) * (floatval($settings['tax_percentage'] ?? 0) / 100);
+                $total = $subtotal - $discount + $tax;
+                $paid = max(0, $paid);
+
+                $status = 'pending';
+                if ($paid >= $total && $total > 0) {
+                    $status = 'paid';
+                } elseif ($paid > 0 && $paid < $total) {
+                    $status = 'partial';
+                }
+
+                $pdo->beginTransaction();
+                try {
+                    $pdo->prepare("DELETE FROM bill_items WHERE bill_id = ?")->execute([$id]);
+
+                    $itemStmt = $pdo->prepare("INSERT INTO bill_items (bill_id, product_id, quantity, unit_price, discount, total) VALUES (?, ?, ?, ?, ?, ?)");
+                    foreach ($items as $item) {
+                        $itemTotal = ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
+                        $itemStmt->execute([$id, $item['product_id'], $item['quantity'], $item['price'], $item['discount'] ?? 0, $itemTotal]);
+                    }
+
+                    $updateStmt = $pdo->prepare("UPDATE bills SET customer_id = ?, subtotal = ?, discount_amount = ?, tax_amount = ?, total_amount = ?, paid_amount = ?, payment_status = ?, payment_method = ? WHERE id = ? AND type = 'retail'");
+                    $updateStmt->execute([$customer_id, $subtotal, $discount, $tax, $total, $paid, $status, $payment_method, $id]);
+
+                    $pdo->commit();
+                    header("Location: ?page=retail&action=view&id=$id&updated=1");
+                    exit;
+                } catch (Exception $e) {
+                    $pdo->rollBack();
+                    $error = "Error: " . $e->getMessage();
+                }
+            }
+        }
     }
 }
 
@@ -313,15 +378,19 @@ include 'header.php';
                     <input type="hidden" name="action" value="download">
                     
                     <div class="mb-3">
-                        <label class="form-label mb-2">Report Type</label>
+                        <label class="form-label mb-2">Generate By</label>
                         <div class="border rounded p-2">
                             <div class="form-check">
-                                <input class="form-check-input" type="radio" id="rt_all" name="report_type" value="all" checked>
-                                <label class="form-check-label" for="rt_all">All Records</label>
+                                <input class="form-check-input" type="radio" id="fm_all" name="filter_mode" value="all" checked>
+                                <label class="form-check-label" for="fm_all">All Records</label>
                             </div>
                             <div class="form-check">
-                                <input class="form-check-input" type="radio" id="rt_paid" name="report_type" value="paid">
-                                <label class="form-check-label" for="rt_paid">Paid Bills Only</label>
+                                <input class="form-check-input" type="radio" id="fm_date" name="filter_mode" value="date">
+                                <label class="form-check-label" for="fm_date">Date Range</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" id="fm_price" name="filter_mode" value="price">
+                                <label class="form-check-label" for="fm_price">Price Range</label>
                             </div>
                         </div>
                     </div>
@@ -330,10 +399,10 @@ include 'header.php';
                         <label class="form-label mb-2">Date Range</label>
                         <div class="row g-2">
                             <div class="col-6">
-                                <input type="date" name="date_from" class="form-control form-control-sm" placeholder="From Date">
+                                <input type="date" name="date_from" class="form-control form-control-sm date-filter-input" placeholder="From Date" disabled>
                             </div>
                             <div class="col-6">
-                                <input type="date" name="date_to" class="form-control form-control-sm" placeholder="To Date">
+                                <input type="date" name="date_to" class="form-control form-control-sm date-filter-input" placeholder="To Date" disabled>
                             </div>
                         </div>
                     </div>
@@ -342,10 +411,10 @@ include 'header.php';
                         <label class="form-label mb-2">Price Range (<?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?>)</label>
                         <div class="row g-2">
                             <div class="col-6">
-                                <input type="number" name="price_from" class="form-control form-control-sm" placeholder="Min Price" step="0.01" min="0">
+                                <input type="number" name="price_from" class="form-control form-control-sm price-filter-input" placeholder="Min Price" step="0.01" min="0" disabled>
                             </div>
                             <div class="col-6">
-                                <input type="number" name="price_to" class="form-control form-control-sm" placeholder="Max Price" step="0.01" min="0">
+                                <input type="number" name="price_to" class="form-control form-control-sm price-filter-input" placeholder="Max Price" step="0.01" min="0" disabled>
                             </div>
                         </div>
                     </div>
@@ -361,11 +430,12 @@ include 'header.php';
 <div class="card">
     <div class="card-body">
         <table class="table table-striped table-hover">
-            <thead><tr><th>Bill No</th><th>Date</th><th>Customer</th><th class="text-end">Total</th><th class="text-end">Paid</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+            <thead><tr><th>Bill No</th><th>Date</th><th>Customer</th><th class="text-end">Total</th><th class="text-end">Paid</th><th class="text-end">Balance</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
             <tbody>
                 <?php
                 $bills = $pdo->query("SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail' ORDER BY b.created_at DESC LIMIT 50")->fetchAll();
                 foreach ($bills as $bill):
+                    $balanceAmount = floatval($bill['paid_amount']) - floatval($bill['total_amount']);
                 ?>
                 <tr>
                     <td><strong><?= htmlspecialchars($bill['bill_number']) ?></strong></td>
@@ -373,6 +443,7 @@ include 'header.php';
                     <td><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in') ?></td>
                     <td class="text-end"><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></td>
                     <td class="text-end"><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></td>
+                    <td class="text-end <?= $balanceAmount >= 0 ? 'text-success fw-bold' : 'text-danger fw-bold' ?>"><?= $currency ?> <?= number_format($balanceAmount, 2) ?></td>
                     <td><span class="badge bg-<?= $bill['payment_status'] == 'paid' ? 'success' : ($bill['payment_status'] == 'partial' ? 'warning' : 'danger') ?>"><?= ucfirst($bill['payment_status']) ?></span></td>
                     <td class="text-end">
                         <a href="?page=retail&action=view&id=<?= $bill['id'] ?>" class="btn btn-sm btn-info"><i class="bi bi-eye"></i></a>
@@ -381,25 +452,137 @@ include 'header.php';
                     </td>
                 </tr>
                 <?php endforeach; ?>
-                <?php if (empty($bills)): ?><tr><td colspan="7" class="text-center text-muted py-4">No bills found</td></tr><?php endif; ?>
+                <?php if (empty($bills)): ?><tr><td colspan="8" class="text-center text-muted py-4">No bills found</td></tr><?php endif; ?>
             </tbody>
         </table>
     </div>
 </div>
 
-<?php elseif ($action === 'create'): ?>
+<script>
+(() => {
+    const reportForm = document.getElementById('reportFilterForm');
+    if (!reportForm) return;
+
+    const modeRadios = reportForm.querySelectorAll('input[name="filter_mode"]');
+    const dateInputs = reportForm.querySelectorAll('.date-filter-input');
+    const priceInputs = reportForm.querySelectorAll('.price-filter-input');
+
+    function getMode() {
+        const selected = reportForm.querySelector('input[name="filter_mode"]:checked');
+        return selected ? selected.value : 'all';
+    }
+
+    function setInputState() {
+        const mode = getMode();
+        const dateEnabled = mode === 'date';
+        const priceEnabled = mode === 'price';
+
+        dateInputs.forEach(input => {
+            input.disabled = !dateEnabled;
+        });
+
+        priceInputs.forEach(input => {
+            input.disabled = !priceEnabled;
+        });
+    }
+
+    function tryAutoSubmit() {
+        const mode = getMode();
+
+        if (mode === 'all') {
+            reportForm.submit();
+            return;
+        }
+
+        if (mode === 'date') {
+            const from = reportForm.querySelector('input[name="date_from"]').value;
+            const to = reportForm.querySelector('input[name="date_to"]').value;
+            if (from !== '' && to !== '') {
+                reportForm.submit();
+            }
+            return;
+        }
+
+        if (mode === 'price') {
+            const from = reportForm.querySelector('input[name="price_from"]').value;
+            const to = reportForm.querySelector('input[name="price_to"]').value;
+            if (from !== '' || to !== '') {
+                reportForm.submit();
+            }
+        }
+    }
+
+    modeRadios.forEach(radio => {
+        radio.addEventListener('change', () => {
+            const mode = getMode();
+            if (mode !== 'date') {
+                dateInputs.forEach(input => {
+                    input.value = '';
+                });
+            }
+            if (mode !== 'price') {
+                priceInputs.forEach(input => {
+                    input.value = '';
+                });
+            }
+            setInputState();
+            tryAutoSubmit();
+        });
+    });
+
+    dateInputs.forEach(input => {
+        input.addEventListener('change', tryAutoSubmit);
+    });
+
+    priceInputs.forEach(input => {
+        input.addEventListener('change', tryAutoSubmit);
+    });
+
+    setInputState();
+})();
+</script>
+
+<?php elseif ($action === 'create' || $action === 'edit'): ?>
 <?php
+$isEdit = $action === 'edit';
+$editBill = null;
+$editItems = [];
+
+if ($isEdit) {
+    $editId = intval($_GET['id'] ?? 0);
+    $editBillStmt = $pdo->prepare("SELECT * FROM bills WHERE id = ? AND type = 'retail'");
+    $editBillStmt->execute([$editId]);
+    $editBill = $editBillStmt->fetch();
+
+    if (!$editBill) {
+        echo '<div class="alert alert-danger">Retail bill not found</div>';
+        include 'footer.php';
+        exit;
+    }
+
+    $editItemsStmt = $pdo->prepare("SELECT bi.*, p.name as product_name, p.sku, p.category_id, p.stock_quantity FROM bill_items bi LEFT JOIN products p ON bi.product_id = p.id WHERE bi.bill_id = ? ORDER BY bi.id ASC");
+    $editItemsStmt->execute([$editId]);
+    $editItems = $editItemsStmt->fetchAll();
+}
+
 $products = $pdo->query("SELECT * FROM products WHERE is_active = 1 AND stock_quantity > 0 ORDER BY name")->fetchAll();
 $customers = $pdo->query("SELECT * FROM customers WHERE is_active = 1 ORDER BY name")->fetchAll();
 $categories = $pdo->query("SELECT * FROM categories WHERE is_active = 1 ORDER BY name")->fetchAll();
+
+$initialDiscountPercent = $isEdit && floatval($editBill['subtotal'] ?? 0) > 0
+    ? (floatval($editBill['discount_amount'] ?? 0) / floatval($editBill['subtotal'])) * 100
+    : 0;
+
+$initialPaidAmount = $isEdit ? floatval($editBill['paid_amount'] ?? 0) : 0;
+$selectedCustomerId = $isEdit ? ($editBill['customer_id'] ?? '') : '';
 ?>
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="mb-0">New Retail Bill</h4>
+    <h4 class="mb-0"><?= $isEdit ? 'Edit Retail Bill' : 'New Retail Bill' ?></h4>
     <a href="?page=retail" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
 </div>
 
-<form method="POST" action="?page=retail&action=store" id="billForm">
+<form method="POST" action="?page=retail&action=<?= $isEdit ? 'update&id=' . intval($editBill['id']) : 'store' ?>" id="billForm">
     <div class="row">
         <div class="col-lg-8">
             <div class="card mb-3">
@@ -449,27 +632,22 @@ $categories = $pdo->query("SELECT * FROM categories WHERE is_active = 1 ORDER BY
                         <label class="form-label">Customer (Optional)</label>
                         <select name="customer_id" class="form-select">
                             <option value="">Walk-in Customer</option>
-                            <?php foreach ($customers as $c): ?><option value="<?= $c['id'] ?>"><?= htmlspecialchars($c['name']) ?> - <?= htmlspecialchars($c['phone']) ?></option><?php endforeach; ?>
+                            <?php foreach ($customers as $c): ?><option value="<?= $c['id'] ?>" <?= (string)$selectedCustomerId === (string)$c['id'] ? 'selected' : '' ?>><?= htmlspecialchars($c['name']) ?> - <?= htmlspecialchars($c['phone']) ?></option><?php endforeach; ?>
                         </select>
                     </div>
                     <div class="d-flex justify-content-between mb-2"><span>Subtotal:</span><span id="subtotal"><?= $currency ?> 0.00</span></div>
                     <div class="d-flex justify-content-between mb-2 align-items-center">
-                        <span>Discount:</span>
-                        <div class="input-group" style="width:120px"><span class="input-group-text"><?= $currency ?></span><input type="number" name="discount_amount" id="discountAmount" class="form-control form-control-sm" value="0" min="0" step="0.01"></div>
+                        <span>Discount (%):</span>
+                        <div class="input-group" style="width:120px"><input type="number" name="discount_percentage" id="discountPercent" class="form-control form-control-sm" value="<?= number_format($initialDiscountPercent, 2, '.', '') ?>" min="0" max="100" step="0.01"><span class="input-group-text">%</span></div>
                     </div>
                     <div class="d-flex justify-content-between mb-2"><span>Tax (<?= $settings['tax_percentage'] ?? 0 ?>%):</span><span id="taxAmount"><?= $currency ?> 0.00</span></div>
                     <hr>
                     <div class="d-flex justify-content-between mb-2"><strong class="fs-5">Grand Total:</strong><strong class="fs-5 text-primary" id="grandTotal"><?= $currency ?> 0.00</strong></div>
-                </div>
-            </div>
-
-            <div class="card mb-3">
-                <div class="card-header"><i class="bi bi-cash-coin me-2"></i>Payment</div>
-                <div class="card-body">
-                    <div class="alert alert-light border mb-0">
-                        <strong>Cash Only</strong><br>
-                        This bill will be saved as fully paid in cash.
+                    <div class="d-flex justify-content-between mb-2 align-items-center">
+                        <span>Paid Amount:</span>
+                        <div class="input-group" style="width:140px"><span class="input-group-text"><?= $currency ?></span><input type="number" name="paid_amount" id="paidAmount" class="form-control form-control-sm" value="<?= number_format($initialPaidAmount, 2, '.', '') ?>" min="0" step="0.01"></div>
                     </div>
+                    <div class="d-flex justify-content-between mb-1"><strong>Balance:</strong><strong id="balanceAmount" class="text-danger"><?= $currency ?> 0.00</strong></div>
                 </div>
             </div>
 
@@ -483,6 +661,18 @@ $categories = $pdo->query("SELECT * FROM categories WHERE is_active = 1 ORDER BY
 <script>
 const currency = '<?= $currency ?>';
 const taxRate = <?= $settings['tax_percentage'] ?? 0 ?>;
+const isEditMode = <?= $isEdit ? 'true' : 'false' ?>;
+const editItemsData = <?= json_encode(array_map(function ($item) {
+    return [
+        'product_id' => $item['product_id'],
+        'name' => $item['product_name'] ?? 'Unknown Product',
+        'sku' => $item['sku'] ?? '',
+        'price' => floatval($item['unit_price'] ?? 0),
+        'stock' => intval($item['stock_quantity'] ?? 0),
+        'quantity' => intval($item['quantity'] ?? 1),
+        'discount' => floatval($item['discount'] ?? 0),
+    ];
+}, $editItems)) ?>;
 let items = [];
 let itemIndex = 0;
 
@@ -544,12 +734,14 @@ function addItem(product) {
     }
 
     document.getElementById('noItemsRow').style.display = 'none';
-    const item = { index: itemIndex, product_id: product.id, name: product.name, sku: product.sku, price: product.price, stock: product.stock, quantity: 1, discount: 0 };
+    const initialQty = parseInt(product.quantity || 1, 10);
+    const initialDiscount = parseFloat(product.discount || 0);
+    const item = { index: itemIndex, product_id: product.id, name: product.name, sku: product.sku, price: product.price, stock: product.stock, quantity: initialQty, discount: initialDiscount };
     items.push(item);
 
     const row = document.createElement('tr');
     row.dataset.index = itemIndex;
-    row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${product.name}</strong><br><small class="text-muted">${product.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${product.id}"></td><td><span class="badge bg-secondary">${product.stock}</span></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="1" min="1" max="${product.stock}" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${product.price.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="0" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${product.price.toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
+    row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${product.name}</strong><br><small class="text-muted">${product.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${product.id}"></td><td><span class="badge bg-secondary">${product.stock}</span></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="${initialQty}" min="1" max="${product.stock}" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${parseFloat(product.price).toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="${initialDiscount.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${((initialQty * parseFloat(product.price)) - initialDiscount).toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
     document.getElementById('itemsBody').appendChild(row);
     itemIndex++;
     updateTotals();
@@ -585,17 +777,43 @@ function updateRowTotal(index) {
 function updateTotals() {
     let subtotal = 0;
     items.forEach(item => { subtotal += (item.quantity * item.price) - item.discount; });
-    const discount = parseFloat(document.getElementById('discountAmount').value) || 0;
+    const discountPercent = parseFloat(document.getElementById('discountPercent').value) || 0;
+    const normalizedDiscountPercent = Math.max(0, Math.min(100, discountPercent));
+    const discount = (subtotal * normalizedDiscountPercent) / 100;
     const tax = ((subtotal - discount) * taxRate) / 100;
     const grandTotal = subtotal - discount + tax;
+    const paid = parseFloat(document.getElementById('paidAmount').value) || 0;
+    const balance = paid - grandTotal;
     
     document.getElementById('subtotal').textContent = `${currency} ${subtotal.toFixed(2)}`;
     document.getElementById('taxAmount').textContent = `${currency} ${tax.toFixed(2)}`;
     document.getElementById('grandTotal').textContent = `${currency} ${grandTotal.toFixed(2)}`;
+    const balanceElement = document.getElementById('balanceAmount');
+    balanceElement.textContent = `${currency} ${balance.toFixed(2)}`;
+    balanceElement.classList.remove('text-danger', 'text-success');
+    balanceElement.classList.add(balance >= 0 ? 'text-success' : 'text-danger');
     document.getElementById('saveBillBtn').disabled = items.length === 0;
 }
 
-document.getElementById('discountAmount').addEventListener('input', updateTotals);
+document.getElementById('discountPercent').addEventListener('input', updateTotals);
+document.getElementById('paidAmount').addEventListener('input', updateTotals);
+
+if (isEditMode && Array.isArray(editItemsData) && editItemsData.length > 0) {
+    document.getElementById('noItemsRow').style.display = 'none';
+    editItemsData.forEach(item => {
+        addItem({
+            id: item.product_id,
+            name: item.name,
+            sku: item.sku,
+            price: parseFloat(item.price),
+            stock: parseInt(item.stock, 10),
+            quantity: parseInt(item.quantity, 10),
+            discount: parseFloat(item.discount)
+        });
+    });
+}
+
+updateTotals();
 </script>
 
 <?php elseif ($action === 'view'): ?>
@@ -609,6 +827,8 @@ if (!$bill) { echo '<div class="alert alert-danger">Bill not found</div>'; inclu
 $items = $pdo->prepare("SELECT bi.*, p.name as product_name, p.sku FROM bill_items bi LEFT JOIN products p ON bi.product_id = p.id WHERE bi.bill_id = ?");
 $items->execute([$id]);
 $items = $items->fetchAll();
+
+$billDiscountPercent = floatval($bill['subtotal']) > 0 ? (floatval($bill['discount_amount']) / floatval($bill['subtotal'])) * 100 : 0;
 ?>
 
 <?php if (isset($_GET['success'])): ?><div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>Bill created successfully!</div><?php endif; ?>
@@ -665,13 +885,13 @@ $items = $items->fetchAll();
             <div class="card-header bg-primary text-white"><i class="bi bi-calculator me-2"></i>Bill Summary</div>
             <div class="card-body">
                 <div class="d-flex justify-content-between mb-2"><span>Subtotal:</span><span><?= $currency ?> <?= number_format($bill['subtotal'], 2) ?></span></div>
-                <div class="d-flex justify-content-between mb-2"><span>Discount:</span><span class="text-danger">- <?= $currency ?> <?= number_format($bill['discount_amount'], 2) ?></span></div>
+                <div class="d-flex justify-content-between mb-2"><span>Discount (<?= number_format($billDiscountPercent, 2) ?>%):</span><span class="text-danger">- <?= $currency ?> <?= number_format($bill['discount_amount'], 2) ?></span></div>
                 <div class="d-flex justify-content-between mb-2"><span>Tax:</span><span><?= $currency ?> <?= number_format($bill['tax_amount'], 2) ?></span></div>
                 <hr>
                 <div class="d-flex justify-content-between mb-2"><strong class="fs-5">Grand Total:</strong><strong class="fs-5 text-primary"><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></strong></div>
                 <hr>
                 <div class="d-flex justify-content-between mb-2"><span>Paid:</span><span class="text-success"><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></span></div>
-                <div class="d-flex justify-content-between"><strong>Balance:</strong><strong class="<?= ($bill['total_amount'] - $bill['paid_amount']) > 0 ? 'text-danger' : 'text-success' ?>"><?= $currency ?> <?= number_format($bill['total_amount'] - $bill['paid_amount'], 2) ?></strong></div>
+                <div class="d-flex justify-content-between"><strong>Balance:</strong><strong class="<?= ($bill['paid_amount'] - $bill['total_amount']) >= 0 ? 'text-success' : 'text-danger' ?>"><?= $currency ?> <?= number_format($bill['paid_amount'] - $bill['total_amount'], 2) ?></strong></div>
             </div>
         </div>
     </div>
@@ -688,6 +908,8 @@ if (!$bill) { echo 'Bill not found'; exit; }
 $items = $pdo->prepare("SELECT bi.*, p.name as product_name, p.sku FROM bill_items bi LEFT JOIN products p ON bi.product_id = p.id WHERE bi.bill_id = ?");
 $items->execute([$id]);
 $items = $items->fetchAll();
+
+$billDiscountPercent = floatval($bill['subtotal']) > 0 ? (floatval($bill['discount_amount']) / floatval($bill['subtotal'])) * 100 : 0;
 ?>
 <!DOCTYPE html>
 <html>
@@ -732,11 +954,11 @@ $items = $items->fetchAll();
 
         <div class="totals">
             <div class="totals-row"><span>Subtotal:</span><span><?= $currency ?> <?= number_format($bill['subtotal'], 2) ?></span></div>
-            <div class="totals-row"><span>Discount:</span><span>- <?= $currency ?> <?= number_format($bill['discount_amount'], 2) ?></span></div>
+            <div class="totals-row"><span>Discount (<?= number_format($billDiscountPercent, 2) ?>%):</span><span>- <?= $currency ?> <?= number_format($bill['discount_amount'], 2) ?></span></div>
             <div class="totals-row"><span>Tax:</span><span><?= $currency ?> <?= number_format($bill['tax_amount'], 2) ?></span></div>
             <div class="totals-row grand-total"><span>Grand Total:</span><span><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></span></div>
             <div class="totals-row"><span>Paid:</span><span><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></span></div>
-            <div class="totals-row"><span>Balance:</span><span><?= $currency ?> <?= number_format($bill['total_amount'] - $bill['paid_amount'], 2) ?></span></div>
+            <div class="totals-row"><span>Balance:</span><span><?= $currency ?> <?= number_format($bill['paid_amount'] - $bill['total_amount'], 2) ?></span></div>
         </div>
 
         <div class="footer"><p>Thank you for your business!</p></div>
