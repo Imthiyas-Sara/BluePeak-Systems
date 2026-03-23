@@ -158,29 +158,7 @@ try {
         ");
     }
     
-    // Insert sample categories if empty
-    $stmt = $pdo->query("SELECT COUNT(*) FROM categories");
-    if ($stmt->fetchColumn() == 0) {
-        $pdo->exec("INSERT INTO categories (name, description) VALUES 
-            ('Crackers', 'Firecrackers and sound crackers'),
-            ('Sparklers', 'Hand-held sparklers'),
-            ('Rockets', 'Sky rockets and missiles'),
-            ('Fountains', 'Ground fountains'),
-            ('Flower Pots', 'Colorful flower pots')
-        ");
-    }
-    
-    // Insert sample products if empty
-    $stmt = $pdo->query("SELECT COUNT(*) FROM products");
-    if ($stmt->fetchColumn() == 0) {
-        $pdo->exec("INSERT INTO products (sku, name, category_id, cost_price, selling_price, wholesale_price, stock_quantity) VALUES 
-            ('SRF-0001', 'Lakshmi Crackers 100pcs', 1, 800, 1000, 900, 50),
-            ('SRF-0002', 'Color Sparklers 10pcs', 2, 150, 200, 180, 100),
-            ('SRF-0003', 'Sky Rocket 5pcs', 3, 400, 500, 450, 30),
-            ('SRF-0004', 'Golden Fountain', 4, 250, 350, 300, 40),
-            ('SRF-0005', 'Flower Pot Deluxe', 5, 180, 250, 220, 60)
-        ");
-    }
+
     
     // Insert sample employees if empty
     $stmt = $pdo->query("SELECT COUNT(*) FROM employees");
