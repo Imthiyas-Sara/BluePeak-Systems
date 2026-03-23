@@ -2,6 +2,252 @@
 $action = $_GET['action'] ?? 'index';
 $currency = $settings['currency_symbol'] ?? 'LKR';
 
+if ($action === 'download') {
+    $reportType = (isset($_GET['report_type']) && $_GET['report_type'] === 'paid') ? 'paid' : 'all';
+    $dateFrom = isset($_GET['date_from']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['date_from']) ? $_GET['date_from'] : '';
+    $dateTo = isset($_GET['date_to']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['date_to']) ? $_GET['date_to'] : '';
+    $priceFrom = (isset($_GET['price_from']) && $_GET['price_from'] !== '') ? max(0, floatval($_GET['price_from'])) : null;
+    $priceTo = (isset($_GET['price_to']) && $_GET['price_to'] !== '') ? max(0, floatval($_GET['price_to'])) : null;
+
+    $query = "SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail'";
+    $params = [];
+
+    if ($reportType === 'paid') {
+        $query .= " AND b.payment_status = 'paid'";
+    }
+    if ($dateFrom !== '') {
+        $query .= " AND DATE(b.created_at) >= ?";
+        $params[] = $dateFrom;
+    }
+    if ($dateTo !== '') {
+        $query .= " AND DATE(b.created_at) <= ?";
+        $params[] = $dateTo;
+    }
+    if ($priceFrom !== null) {
+        $query .= " AND b.total_amount >= ?";
+        $params[] = $priceFrom;
+    }
+    if ($priceTo !== null) {
+        $query .= " AND b.total_amount <= ?";
+        $params[] = $priceTo;
+    }
+    $query .= " ORDER BY b.created_at DESC LIMIT 1000";
+
+    $stmt = $pdo->prepare($query);
+    $stmt->execute($params);
+    $billsForExport = $stmt->fetchAll();
+
+    $pdfEscape = function ($text) {
+        $text = (string)$text;
+        $text = str_replace('\\', '\\\\', $text);
+        $text = str_replace('(', '\\(', $text);
+        $text = str_replace(')', '\\)', $text);
+        $text = str_replace(["\r", "\n", "\t"], ' ', $text);
+        return $text;
+    };
+
+    $trimCell = function ($text, $maxChars) {
+        $text = trim((string)$text);
+        if (strlen($text) <= $maxChars) {
+            return $text;
+        }
+        return substr($text, 0, max(0, $maxChars - 3)) . '...';
+    };
+
+    $rows = [];
+    $sumTotal = 0.0;
+    $sumPaid = 0.0;
+    $sumBalance = 0.0;
+
+    foreach ($billsForExport as $bill) {
+        $total = floatval($bill['total_amount'] ?? 0);
+        $paid = floatval($bill['paid_amount'] ?? 0);
+        $balance = $total - $paid;
+        $sumTotal += $total;
+        $sumPaid += $paid;
+        $sumBalance += $balance;
+
+        $rows[] = [
+            'bill_no' => $trimCell($bill['bill_number'] ?? '', 15),
+            'date' => date('d M Y', strtotime($bill['created_at'] ?? 'now')),
+            'customer' => $trimCell($bill['customer_name'] ?? 'Walk-in', 22),
+            'total' => number_format($total, 2, '.', ','),
+            'paid' => number_format($paid, 2, '.', ','),
+            'balance' => number_format($balance, 2, '.', ','),
+            'status' => $trimCell(ucfirst($bill['payment_status'] ?? 'pending'), 10),
+        ];
+    }
+
+    $rowsPerPage = 29;
+    $rowPages = array_chunk($rows, $rowsPerPage);
+    if (empty($rowPages)) {
+        $rowPages = [[]];
+    }
+
+    $objects = [];
+    $objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+    $objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+    $objects[4] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>';
+    $objects[5] = '<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>';
+    $objects[6] = '<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold >>';
+
+    $pageRefs = [];
+    $nextObj = 7;
+
+    $pageWidth = 595;
+    $margin = 30;
+    $tableWidth = $pageWidth - ($margin * 2);
+    $columns = [
+        ['key' => 'bill_no', 'label' => 'Bill No', 'width' => 70, 'align' => 'L'],
+        ['key' => 'date', 'label' => 'Date', 'width' => 70, 'align' => 'L'],
+        ['key' => 'customer', 'label' => 'Customer', 'width' => 120, 'align' => 'L'],
+        ['key' => 'total', 'label' => 'Total', 'width' => 80, 'align' => 'R'],
+        ['key' => 'paid', 'label' => 'Paid', 'width' => 80, 'align' => 'R'],
+        ['key' => 'balance', 'label' => 'Balance', 'width' => 80, 'align' => 'R'],
+        ['key' => 'status', 'label' => 'Status', 'width' => 35, 'align' => 'L'],
+    ];
+
+    $drawText = function ($x, $y, $text, $fontSize, $bold, $tableMode = false) use ($pdfEscape) {
+        if ($tableMode) {
+            $font = $bold ? '/F6' : '/F5';
+        } else {
+            $font = $bold ? '/F2' : '/F1';
+        }
+        return "BT\n{$font} {$fontSize} Tf\n1 0 0 1 {$x} {$y} Tm (" . $pdfEscape($text) . ") Tj\nET\n";
+    };
+
+    $drawRightText = function ($xRight, $y, $text, $fontSize, $bold, $tableMode = false) use ($pdfEscape) {
+        if ($tableMode) {
+            $font = $bold ? '/F6' : '/F5';
+            $charWidth = $fontSize * 0.60;
+        } else {
+            $font = $bold ? '/F2' : '/F1';
+            $charWidth = $fontSize * 0.50;
+        }
+        $textWidth = strlen((string)$text) * $charWidth;
+        $x = $xRight - $textWidth;
+        return "BT\n{$font} {$fontSize} Tf\n1 0 0 1 {$x} {$y} Tm (" . $pdfEscape($text) . ") Tj\nET\n";
+    };
+
+    foreach ($rowPages as $pageIndex => $rowPage) {
+        $pageObj = $nextObj++;
+        $contentObj = $nextObj++;
+        $pageRefs[] = $pageObj . ' 0 R';
+
+        $content = "";
+
+        $content .= "q\n0.13 0.35 0.75 rg\n{$margin} 785 {$tableWidth} 34 re f\nQ\n";
+        $content .= $drawText($margin + 10, 798, 'Retail Billing Report', 14, true);
+
+        $summaryTop = 776;
+        $summaryRowHeight = 16;
+        $summaryColWidth = $tableWidth / 3;
+        $summaryRows = [
+            [
+                'Generated: ' . date('Y-m-d H:i:s'),
+                'Records: ' . count($rows),
+                'Page: ' . ($pageIndex + 1) . '/' . count($rowPages),
+            ],
+            [
+                'Total: ' . number_format($sumTotal, 2),
+                'Paid: ' . number_format($sumPaid, 2),
+                'Balance: ' . number_format($sumBalance, 2),
+            ],
+        ];
+
+        foreach ($summaryRows as $rowIndex => $summaryRow) {
+            $cellY = $summaryTop - ($rowIndex * $summaryRowHeight);
+            foreach ($summaryRow as $colIndex => $cellText) {
+                $cellX = $margin + ($colIndex * $summaryColWidth);
+                if ($rowIndex === 0) {
+                    $content .= "q\n0.97 0.98 1 rg\n{$cellX} " . ($cellY - $summaryRowHeight) . " {$summaryColWidth} {$summaryRowHeight} re f\nQ\n";
+                }
+                $content .= "q\n0.85 0.88 0.94 RG\n0.5 w\n{$cellX} " . ($cellY - $summaryRowHeight) . " {$summaryColWidth} {$summaryRowHeight} re S\nQ\n";
+                $content .= $drawText($cellX + 6, $cellY - 11, $cellText, 8.5, false);
+            }
+        }
+
+        $tableTop = 730;
+        $headerHeight = 20;
+        $rowHeight = 18;
+        $content .= "q\n0.90 0.93 0.98 rg\n{$margin} " . ($tableTop - $headerHeight) . " {$tableWidth} {$headerHeight} re f\nQ\n";
+        $content .= "q\n0.75 0.80 0.90 RG\n0.8 w\n{$margin} " . ($tableTop - $headerHeight) . " {$tableWidth} {$headerHeight} re S\nQ\n";
+
+        $x = $margin;
+        foreach ($columns as $col) {
+            $content .= $drawText($x + 4, $tableTop - 14, $col['label'], 9, true, true);
+            $x += $col['width'];
+            $content .= "q\n0.85 0.88 0.94 RG\n0.5 w\n{$x} " . ($tableTop - $headerHeight) . " m {$x} " . ($tableTop - $headerHeight - ($rowHeight * max(1, count($rowPage)))) . " l S\nQ\n";
+        }
+
+        $currentY = $tableTop - $headerHeight;
+        if (empty($rowPage)) {
+            $content .= "q\n0.92 0.92 0.92 RG\n0.5 w\n{$margin} " . ($currentY - $rowHeight) . " {$tableWidth} {$rowHeight} re S\nQ\n";
+            $content .= $drawText($margin + 8, $currentY - 13, 'No records found for selected filters.', 9, false, true);
+            $currentY -= $rowHeight;
+        } else {
+            foreach ($rowPage as $i => $row) {
+                if ($i % 2 === 0) {
+                    $content .= "q\n0.98 0.99 1 rg\n{$margin} " . ($currentY - $rowHeight) . " {$tableWidth} {$rowHeight} re f\nQ\n";
+                }
+                $content .= "q\n0.92 0.92 0.92 RG\n0.5 w\n{$margin} " . ($currentY - $rowHeight) . " {$tableWidth} {$rowHeight} re S\nQ\n";
+
+                $x = $margin;
+                foreach ($columns as $col) {
+                    $value = $row[$col['key']] ?? '';
+                    if ($col['align'] === 'R') {
+                        $content .= $drawRightText($x + $col['width'] - 6, $currentY - 12, $value, 9, false, true);
+                    } else {
+                        $content .= $drawText($x + 4, $currentY - 12, $value, 9, false, true);
+                    }
+                    $x += $col['width'];
+                }
+
+                $currentY -= $rowHeight;
+            }
+        }
+
+        $objects[$contentObj] = "<< /Length " . strlen($content) . " >>\nstream\n" . $content . "\nendstream";
+        $objects[$pageObj] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F5 5 0 R /F6 6 0 R >> >> /Contents ' . $contentObj . ' 0 R >>';
+    }
+
+    $objects[2] = '<< /Type /Pages /Kids [' . implode(' ', $pageRefs) . '] /Count ' . count($pageRefs) . ' >>';
+
+    ksort($objects);
+    $maxObj = max(array_keys($objects));
+
+    $pdf = "%PDF-1.4\n";
+    $offsets = [];
+    for ($i = 1; $i <= $maxObj; $i++) {
+        if (!isset($objects[$i])) {
+            continue;
+        }
+        $offsets[$i] = strlen($pdf);
+        $pdf .= $i . " 0 obj\n" . $objects[$i] . "\nendobj\n";
+    }
+
+    $xrefOffset = strlen($pdf);
+    $pdf .= "xref\n";
+    $pdf .= '0 ' . ($maxObj + 1) . "\n";
+    $pdf .= "0000000000 65535 f \n";
+    for ($i = 1; $i <= $maxObj; $i++) {
+        $off = $offsets[$i] ?? 0;
+        $pdf .= sprintf('%010d 00000 n ', $off) . "\n";
+    }
+    $pdf .= "trailer\n";
+    $pdf .= '<< /Size ' . ($maxObj + 1) . ' /Root 1 0 R >>' . "\n";
+    $pdf .= "startxref\n";
+    $pdf .= $xrefOffset . "\n";
+    $pdf .= "%%EOF";
+
+    $fileName = 'retail-report-' . date('Ymd-His') . '.pdf';
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: attachment; filename=' . $fileName);
+    header('Content-Length: ' . strlen($pdf));
+    echo $pdf;
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'store') {
         $customer_id = $_POST['customer_id'] ?: null;
@@ -47,167 +293,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error = "Error: " . $e->getMessage();
             }
         }
-    } elseif ($action === 'download') {
-        // Get filter parameters
-        $reportType = isset($_GET['report_type']) && $_GET['report_type'] === 'paid' ? 'paid' : 'all';
-        $dateFrom = isset($_GET['date_from']) && $_GET['date_from'] !== '' ? $_GET['date_from'] : null;
-        $dateTo = isset($_GET['date_to']) && $_GET['date_to'] !== '' ? $_GET['date_to'] : null;
-        $priceFrom = isset($_GET['price_from']) && $_GET['price_from'] !== '' ? floatval($_GET['price_from']) : null;
-        $priceTo = isset($_GET['price_to']) && $_GET['price_to'] !== '' ? floatval($_GET['price_to']) : null;
-        
-        // Build query
-        $query = "SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail'";
-        $params = [];
-        
-        // Apply report type filter
-        if ($reportType === 'paid') {
-            $query .= " AND b.payment_status = 'paid'";
-        }
-        
-        // Apply date filters
-        if ($dateFrom) {
-            $query .= " AND DATE(b.created_at) >= ?";
-            $params[] = $dateFrom;
-        }
-        if ($dateTo) {
-            $query .= " AND DATE(b.created_at) <= ?";
-            $params[] = $dateTo;
-        }
-        
-        // Apply price filters
-        if ($priceFrom !== null) {
-            $query .= " AND b.total_amount >= ?";
-            $params[] = $priceFrom;
-        }
-        if ($priceTo !== null) {
-            $query .= " AND b.total_amount <= ?";
-            $params[] = $priceTo;
-        }
-        
-        $query .= " ORDER BY b.created_at DESC";
-        
-        $stmt = $pdo->prepare($query);
-        $stmt->execute($params);
-        $bills = $stmt->fetchAll();
-        
-        // Calculate totals
-        $totalAmount = 0;
-        $totalPaid = 0;
-        $totalBalance = 0;
-        foreach ($bills as $bill) {
-            $totalAmount += floatval($bill['total_amount']);
-            $totalPaid += floatval($bill['paid_amount']);
-            $totalBalance += floatval($bill['total_amount']) - floatval($bill['paid_amount']);
-        }
-        
-        // Generate HTML for PDF conversion
-        ob_start();
-        ?>
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Retail Bills Report</title>
-<style>
-* { margin: 0; padding: 0; }
-body { font-family: Arial, sans-serif; padding: 20px; background: white; }
-.header { text-align: center; margin-bottom: 20px; border-bottom: 2px solid #333; padding-bottom: 15px; }
-.header h1 { font-size: 24px; margin-bottom: 5px; }
-.header p { color: #666; font-size: 12px; }
-.company-info { text-align: center; font-size: 11px; color: #666; margin-bottom: 15px; }
-.filters { background: #f5f5f5; padding: 10px; margin-bottom: 15px; border-left: 4px solid #4f46e5; font-size: 12px; }
-.filters strong { display: block; margin-bottom: 5px; }
-table { width: 100%; border-collapse: collapse; margin-bottom: 15px; }
-thead { background-color: #4f46e5; color: white; }
-th { padding: 10px; text-align: left; font-weight: bold; border: 1px solid #333; }
-td { padding: 10px; border: 1px solid #ddd; }
-tbody tr:nth-child(even) { background: #f9f9f9; }
-.text-end { text-align: right; }
-.summary-row { background: #f0f0f0; font-weight: bold; }
-.footer { margin-top: 20px; text-align: center; font-size: 11px; color: #999; border-top: 1px solid #ddd; padding-top: 10px; }
-@media print { body { padding: 0; } }
-</style>
-</head>
-<body>
-<div class="header">
-<h1>Retail Bills Report</h1>
-<p>Generated on <?= date('d M Y H:i:s') ?></p>
-</div>
-
-<div class="company-info">
-<?= htmlspecialchars($settings['company_name'] ?? 'Sri Ram Fire Works') ?><br>
-<?= htmlspecialchars($settings['company_address'] ?? '') ?><br>
-<?= htmlspecialchars($settings['company_phone'] ?? '') ?>
-</div>
-
-<div class="filters">
-<strong>Report Filters:</strong>
-Report Type: <?= $reportType === 'paid' ? 'Paid Bills Only' : 'All Records' ?><br>
-<?php if ($dateFrom || $dateTo): ?>
-Date Range: <?= $dateFrom ?: 'Any' ?> to <?= $dateTo ?: 'Any' ?><br>
-<?php endif; ?>
-<?php if ($priceFrom !== null || $priceTo !== null): ?>
-Price Range: <?= $settings['currency_symbol'] ?? 'LKR' ?> <?= $priceFrom !== null ? number_format($priceFrom, 2) : '0' ?> to <?= $priceTo !== null ? number_format($priceTo, 2) : 'Unlimited' ?>
-<?php endif; ?>
-</div>
-
-<table>
-<thead>
-<tr>
-<th>Bill No</th>
-<th>Date</th>
-<th>Customer</th>
-<th class="text-end">Total</th>
-<th class="text-end">Paid</th>
-<th class="text-end">Balance</th>
-<th>Status</th>
-</tr>
-</thead>
-<tbody>
-<?php foreach ($bills as $bill): 
-    $balance = floatval($bill['total_amount']) - floatval($bill['paid_amount']);
-    $status = $bill['payment_status'] == 'paid' ? 'Paid' : ($bill['payment_status'] == 'partial' ? 'Partial' : 'Pending');
-?>
-<tr>
-<td><?= htmlspecialchars($bill['bill_number']) ?></td>
-<td><?= date('d M Y H:i', strtotime($bill['created_at'])) ?></td>
-<td><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in') ?></td>
-<td class="text-end"><?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?> <?= number_format($bill['total_amount'], 2) ?></td>
-<td class="text-end"><?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?> <?= number_format($bill['paid_amount'], 2) ?></td>
-<td class="text-end"><?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?> <?= number_format($balance, 2) ?></td>
-<td><?= $status ?></td>
-</tr>
-<?php endforeach; ?>
-</tbody>
-<tfoot>
-<tr class="summary-row">
-<td colspan="3">TOTAL</td>
-<td class="text-end"><?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?> <?= number_format($totalAmount, 2) ?></td>
-<td class="text-end"><?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?> <?= number_format($totalPaid, 2) ?></td>
-<td class="text-end"><?= htmlspecialchars($settings['currency_symbol'] ?? 'LKR') ?> <?= number_format($totalBalance, 2) ?></td>
-<td></td>
-</tr>
-</tfoot>
-</table>
-
-<div class="footer">
-<p>This is a computer-generated report.<br>
-<?= htmlspecialchars($settings['company_name'] ?? 'Sri Ram Fire Works') ?></p>
-</div>
-
-<script>
-window.print();
-</script>
-</body>
-</html>
-        <?php
-        $html = ob_get_clean();
-        
-        // Send as HTML with print dialog
-        header('Content-Type: text/html; charset=utf-8');
-        header('Content-Disposition: inline; filename="retail_bills_' . date('Y-m-d_H-i-s') . '.html"');
-        echo $html;
-        exit;
     }
 }
 
