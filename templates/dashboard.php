@@ -8,6 +8,15 @@ $monthBills = $pdo->query("SELECT COUNT(*) as count, COALESCE(SUM(total_amount),
 $totalProducts = $pdo->query("SELECT COUNT(*) FROM products WHERE is_active = 1")->fetchColumn();
 $lowStock = $pdo->query("SELECT COUNT(*) FROM products WHERE stock_quantity <= min_stock_level AND is_active = 1")->fetchColumn();
 
+if (!is_array($todayBills)) {
+    $todayBills = ['count' => 0, 'total' => 0];
+}
+if (!is_array($monthBills)) {
+    $monthBills = ['count' => 0, 'total' => 0];
+}
+$totalProducts = (int) ($totalProducts ?: 0);
+$lowStock = (int) ($lowStock ?: 0);
+
 // Recent bills
 $recentBills = $pdo->query("SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id ORDER BY b.created_at DESC LIMIT 5")->fetchAll();
 
@@ -19,8 +28,8 @@ include 'header.php';
         <div class="card stat-card">
             <div class="card-body">
                 <h6 class="text-muted"><i class="bi bi-calendar-day me-2"></i>Today's Sales</h6>
-                <h3 class="mb-0"><?= $currency ?> <?= number_format($todayBills['total'], 2) ?></h3>
-                <small class="text-muted"><?= $todayBills['count'] ?> bills</small>
+                <h3 class="mb-0"><?= $currency ?> <?= number_format((float) ($todayBills['total'] ?? 0), 2) ?></h3>
+                <small class="text-muted"><?= (int) ($todayBills['count'] ?? 0) ?> bills</small>
             </div>
         </div>
     </div>
@@ -28,8 +37,8 @@ include 'header.php';
         <div class="card stat-card success">
             <div class="card-body">
                 <h6 class="text-muted"><i class="bi bi-calendar-month me-2"></i>Monthly Sales</h6>
-                <h3 class="mb-0"><?= $currency ?> <?= number_format($monthBills['total'], 2) ?></h3>
-                <small class="text-muted"><?= $monthBills['count'] ?> bills</small>
+                <h3 class="mb-0"><?= $currency ?> <?= number_format((float) ($monthBills['total'] ?? 0), 2) ?></h3>
+                <small class="text-muted"><?= (int) ($monthBills['count'] ?? 0) ?> bills</small>
             </div>
         </div>
     </div>

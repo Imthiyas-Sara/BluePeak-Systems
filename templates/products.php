@@ -1,6 +1,21 @@
 ﻿<?php
 $action = $_GET['action'] ?? 'index';
 $currency = $settings['currency_symbol'] ?? 'LKR';
+$demoMode = !empty($_SESSION['demo_mode']);
+
+if ($demoMode) {
+    if (!isset($_SESSION['mock_products']) || !is_array($_SESSION['mock_products'])) {
+        $_SESSION['mock_products'] = [];
+    }
+    if (!isset($_SESSION['mock_next_product_id'])) {
+        $_SESSION['mock_next_product_id'] = 1;
+    }
+    if (!isset($_SESSION['mock_categories']) || !is_array($_SESSION['mock_categories'])) {
+        $_SESSION['mock_categories'] = [
+            ['id' => 1, 'name' => 'General']
+        ];
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'store') {
@@ -15,8 +30,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $description = trim($_POST['description'] ?? '');
         
         if ($name && $sku && $selling_price > 0) {
-            $stmt = $pdo->prepare("INSERT INTO products (sku, name, category_id, cost_price, selling_price, wholesale_price, stock_quantity, min_stock_level, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$sku, $name, $category_id ?: null, $cost_price, $selling_price, $wholesale_price, $stock_quantity, $min_stock_level, $description]);
+            if ($demoMode) {
+                $newId = (int) $_SESSION['mock_next_product_id']++;
+                $_SESSION['mock_products'][] = [
+                    'id' => $newId,
+                    'sku' => $sku,
+                    'name' => $name,
+                    'category_id' => $category_id ?: null,
+                    'cost_price' => $cost_price,
+                    'selling_price' => $selling_price,
+                    'wholesale_price' => $wholesale_price,
+                    'stock_quantity' => $stock_quantity,
+                    'min_stock_level' => $min_stock_level,
+                    'description' => $description,
+                    'is_active' => 1,
+                    'created_at' => date('Y-m-d H:i:s')
+                ];
+            } else {
+                $stmt = $pdo->prepare("INSERT INTO products (sku, name, category_id, cost_price, selling_price, wholesale_price, stock_quantity, min_stock_level, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$sku, $name, $category_id ?: null, $cost_price, $selling_price, $wholesale_price, $stock_quantity, $min_stock_level, $description]);
+            }
             header("Location: ?page=products&success=1");
             exit;
         }
@@ -34,21 +67,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $is_active = isset($_POST['is_active']) ? 1 : 0;
         
         if ($name && $sku && $selling_price > 0) {
-            $stmt = $pdo->prepare("UPDATE products SET sku = ?, name = ?, category_id = ?, cost_price = ?, selling_price = ?, wholesale_price = ?, stock_quantity = ?, min_stock_level = ?, description = ?, is_active = ? WHERE id = ?");
-            $stmt->execute([$sku, $name, $category_id ?: null, $cost_price, $selling_price, $wholesale_price, $stock_quantity, $min_stock_level, $description, $is_active, $id]);
+            if ($demoMode) {
+                foreach ($_SESSION['mock_products'] as &$productRow) {
+                    if ((int) $productRow['id'] === $id) {
+                        $productRow['sku'] = $sku;
+                        $productRow['name'] = $name;
+                        $productRow['category_id'] = $category_id ?: null;
+                        $productRow['cost_price'] = $cost_price;
+                        $productRow['selling_price'] = $selling_price;
+                        $productRow['wholesale_price'] = $wholesale_price;
+                        $productRow['stock_quantity'] = $stock_quantity;
+                        $productRow['min_stock_level'] = $min_stock_level;
+                        $productRow['description'] = $description;
+                        $productRow['is_active'] = $is_active;
+                        break;
+                    }
+                }
+                unset($productRow);
+            } else {
+                $stmt = $pdo->prepare("UPDATE products SET sku = ?, name = ?, category_id = ?, cost_price = ?, selling_price = ?, wholesale_price = ?, stock_quantity = ?, min_stock_level = ?, description = ?, is_active = ? WHERE id = ?");
+                $stmt->execute([$sku, $name, $category_id ?: null, $cost_price, $selling_price, $wholesale_price, $stock_quantity, $min_stock_level, $description, $is_active, $id]);
+            }
             header("Location: ?page=products&success=2");
             exit;
         }
     } elseif ($action === 'delete') {
         $id = intval($_GET['id'] ?? 0);
-        $pdo->prepare("DELETE FROM products WHERE id = ?")->execute([$id]);
+        if ($demoMode) {
+            $_SESSION['mock_products'] = array_values(array_filter($_SESSION['mock_products'], function ($row) use ($id) {
+                return (int) ($row['id'] ?? 0) !== $id;
+            }));
+        } else {
+            $pdo->prepare("DELETE FROM products WHERE id = ?")->execute([$id]);
+        }
         header("Location: ?page=products&success=3");
         exit;
     }
 }
 
 include 'header.php';
-$categories = $pdo->query("SELECT * FROM categories ORDER BY name")->fetchAll();
+$categories = $demoMode
+    ? $_SESSION['mock_categories']
+    : $pdo->query("SELECT * FROM categories ORDER BY name")->fetchAll();
 $selectedCategory = intval($_GET['category'] ?? 0);
 ?>
 
@@ -123,13 +183,33 @@ $selectedCategory = intval($_GET['category'] ?? 0);
             </thead>
             <tbody>
                 <?php
-                $productSql = "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id";
-                if ($selectedCategory > 0) {
-                    $stmt = $pdo->prepare($productSql . " WHERE p.category_id = ? ORDER BY p.name");
-                    $stmt->execute([$selectedCategory]);
-                    $products = $stmt->fetchAll();
+                if ($demoMode) {
+                    $categoryMap = [];
+                    foreach ($categories as $catRow) {
+                        $categoryMap[(int) $catRow['id']] = $catRow['name'];
+                    }
+
+                    $products = $_SESSION['mock_products'];
+                    if ($selectedCategory > 0) {
+                        $products = array_values(array_filter($products, function ($row) use ($selectedCategory) {
+                            return (int) ($row['category_id'] ?? 0) === $selectedCategory;
+                        }));
+                    }
+
+                    foreach ($products as &$productRow) {
+                        $categoryId = (int) ($productRow['category_id'] ?? 0);
+                        $productRow['category_name'] = $categoryMap[$categoryId] ?? 'Uncategorized';
+                    }
+                    unset($productRow);
                 } else {
-                    $products = $pdo->query($productSql . " ORDER BY p.name")->fetchAll();
+                    $productSql = "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id";
+                    if ($selectedCategory > 0) {
+                        $stmt = $pdo->prepare($productSql . " WHERE p.category_id = ? ORDER BY p.name");
+                        $stmt->execute([$selectedCategory]);
+                        $products = $stmt->fetchAll();
+                    } else {
+                        $products = $pdo->query($productSql . " ORDER BY p.name")->fetchAll();
+                    }
                 }
                 foreach ($products as $p):
                 $stockClass = $p['stock_quantity'] <= 0 ? 'bg-danger' : ($p['stock_quantity'] <= $p['min_stock_level'] ? 'bg-warning text-dark' : 'bg-success');
@@ -347,9 +427,19 @@ function downloadStockPdfReport() {
 <?php elseif ($action === 'edit'): ?>
 <?php
 $id = intval($_GET['id'] ?? 0);
-$product = $pdo->prepare("SELECT * FROM products WHERE id = ?");
-$product->execute([$id]);
-$product = $product->fetch();
+if ($demoMode) {
+    $product = null;
+    foreach ($_SESSION['mock_products'] as $productRow) {
+        if ((int) ($productRow['id'] ?? 0) === $id) {
+            $product = $productRow;
+            break;
+        }
+    }
+} else {
+    $product = $pdo->prepare("SELECT * FROM products WHERE id = ?");
+    $product->execute([$id]);
+    $product = $product->fetch();
+}
 if (!$product) { echo '<div class="alert alert-danger">Product not found</div>'; include 'footer.php'; exit; }
 ?>
 
