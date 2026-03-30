@@ -78,11 +78,7 @@
                 }
 
                 field.classList.remove('is-invalid');
-                if (field.value !== '') {
-                    field.classList.add('is-valid');
-                } else {
-                    field.classList.remove('is-valid');
-                }
+                field.classList.remove('is-valid');
                 return true;
             }
 

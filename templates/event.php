@@ -1272,6 +1272,13 @@ $billCustomerPhone = $extractCustomerPhoneFromNotes($bill['notes'] ?? '') ?: '-'
 $items = $pdo->prepare("SELECT bi.*, p.name as product_name, p.sku FROM bill_items bi LEFT JOIN products p ON bi.product_id = p.id WHERE bi.bill_id = ?");
 $items->execute([$id]);
 $items = $items->fetchAll();
+$showDiscountColumn = false;
+foreach ($items as $item) {
+    if (floatval($item['discount'] ?? 0) > 0) {
+        $showDiscountColumn = true;
+        break;
+    }
+}
 ?>
 
 <?php if (isset($_GET['success'])): ?><div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>Event bill created successfully!</div><?php endif; ?>
@@ -1317,7 +1324,7 @@ $items = $items->fetchAll();
             <div class="card-header"><i class="bi bi-list-ul me-2"></i>Bill Items</div>
             <div class="card-body p-0">
                 <table class="table table-striped mb-0">
-                    <thead class="table-dark"><tr><th>#</th><th>Product</th><th class="text-center">Qty</th><th class="text-end">Price</th><th class="text-end">Discount</th><th class="text-end">Total</th></tr></thead>
+                    <thead class="table-dark"><tr><th>#</th><th>Product</th><th class="text-center">Qty</th><th class="text-end">Price</th><?php if ($showDiscountColumn): ?><th class="text-end">Discount</th><?php endif; ?><th class="text-end">Total</th></tr></thead>
                     <tbody>
                         <?php foreach ($items as $i => $item): ?>
                         <tr>
@@ -1325,7 +1332,9 @@ $items = $items->fetchAll();
                             <td><strong><?= htmlspecialchars($item['product_name']) ?></strong><br><small class="text-muted"><?= htmlspecialchars($item['sku']) ?></small></td>
                             <td class="text-center"><?= $item['quantity'] ?></td>
                             <td class="text-end"><?= $currency ?> <?= number_format($item['unit_price'], 2) ?></td>
+                            <?php if ($showDiscountColumn): ?>
                             <td class="text-end"><?= $currency ?> <?= number_format($item['discount'], 2) ?></td>
+                            <?php endif; ?>
                             <td class="text-end"><?= $currency ?> <?= number_format($item['total'], 2) ?></td>
                         </tr>
                         <?php endforeach; ?>
@@ -1369,6 +1378,13 @@ $billEventAddress = $extractEventAddressFromNotes($bill['notes'] ?? '') ?: '-';
 $items = $pdo->prepare("SELECT bi.*, p.name as product_name, p.sku FROM bill_items bi LEFT JOIN products p ON bi.product_id = p.id WHERE bi.bill_id = ?");
 $items->execute([$id]);
 $items = $items->fetchAll();
+$showDiscountColumn = false;
+foreach ($items as $item) {
+    if (floatval($item['discount'] ?? 0) > 0) {
+        $showDiscountColumn = true;
+        break;
+    }
+}
 $brandLogoPath = 'WhatsApp Image 2026-03-30 at 21.39.04.jpeg';
 $brandLogoSrc = str_replace(' ', '%20', $brandLogoPath);
 ?>
@@ -1395,7 +1411,11 @@ $brandLogoSrc = str_replace(' ', '%20', $brandLogoPath);
         .totals { float: right; width: 300px; }
         .totals-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
         .grand-total { font-size: 16px; font-weight: bold; border-top: 2px solid #333; }
-        .footer { clear: both; margin-top: 40px; text-align: center; font-size: 10px; color: #666; }
+        .footer { clear: both; margin-top: 52px; text-align: center; font-size: 10px; color: #666; line-height: 1.6; }
+        .footer-divider { border-top: 1px solid #cbd5e1; width: 70%; margin: 10px auto; }
+        .footer-main { font-weight: 600; margin: 0; }
+        .footer-sub { margin: 0; }
+        .footer-credit { margin-top: 10px; font-size: 9.5px; color: #4b5563; }
         @media print { .no-print { display: none; } }
     </style>
 </head>
@@ -1421,10 +1441,10 @@ $brandLogoSrc = str_replace(' ', '%20', $brandLogoPath);
         </div>
 
         <table>
-            <thead><tr><th>#</th><th>Product</th><th>Qty</th><th>Price</th><th>Discount</th><th>Total</th></tr></thead>
+            <thead><tr><th>#</th><th>Product</th><th>Qty</th><th>Price</th><?php if ($showDiscountColumn): ?><th>Discount</th><?php endif; ?><th>Total</th></tr></thead>
             <tbody>
                 <?php foreach ($items as $i => $item): ?>
-                <tr><td><?= $i + 1 ?></td><td><?= htmlspecialchars($item['product_name']) ?></td><td><?= $item['quantity'] ?></td><td><?= $currency ?> <?= number_format($item['unit_price'], 2) ?></td><td><?= $currency ?> <?= number_format($item['discount'], 2) ?></td><td><?= $currency ?> <?= number_format($item['total'], 2) ?></td></tr>
+                <tr><td><?= $i + 1 ?></td><td><?= htmlspecialchars($item['product_name']) ?></td><td><?= $item['quantity'] ?></td><td><?= $currency ?> <?= number_format($item['unit_price'], 2) ?></td><?php if ($showDiscountColumn): ?><td><?= $currency ?> <?= number_format($item['discount'], 2) ?></td><?php endif; ?><td><?= $currency ?> <?= number_format($item['total'], 2) ?></td></tr>
                 <?php endforeach; ?>
             </tbody>
         </table>
@@ -1439,7 +1459,13 @@ $brandLogoSrc = str_replace(' ', '%20', $brandLogoPath);
             <div class="totals-row"><span>Balance Due:</span><span><?= $currency ?> <?= number_format($bill['total_amount'] - $bill['paid_amount'], 2) ?></span></div>
         </div>
 
-        <div class="footer"><p>Thank you for your business!</p></div>
+        <div class="footer">
+            <div class="footer-divider"></div>
+            <p class="footer-main">Thanks for choosing us!</p>
+            <div class="footer-divider"></div>
+            <p class="footer-sub">Light safe, stay safe. Please read all instructions before use.</p>
+            <p class="footer-credit">System by - BluePeak Systems</p>
+        </div>
         <div class="no-print" style="text-align:center; margin-top:20px"><button onclick="window.print()" style="padding:10px 30px; background:#333; color:white; border:none; border-radius:5px; cursor:pointer">Print Invoice</button></div>
     </div>
 </body>

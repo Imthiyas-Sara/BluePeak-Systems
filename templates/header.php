@@ -28,7 +28,7 @@ $showReportButton = in_array($page, ['retail', 'event', 'products', 'suppliers',
         body { background-color: #f4f7ff; color: #1f2937; }
         .sidebar { width: var(--sidebar-width); min-height: 100vh; background: #ffffff; border-right: 1px solid #e5e7eb; position: fixed; left: 0; top: 0; z-index: 100; display: flex; flex-direction: column; }
         .sidebar .brand { padding: 28px 20px 20px; color: #243b7b; border-bottom: 1px solid #eef2ff; }
-        .sidebar .brand i { color: var(--primary-color); font-size: 1.8rem; }
+        .sidebar .brand-logo { width: 42px; height: 42px; object-fit: cover; border-radius: 50%; border: 1px solid #d1d5db; }
         .sidebar .brand small { color: #94a3b8 !important; }
         .sidebar .nav-link { color: #94a3b8; padding: 12px 20px; margin: 2px 12px; border-radius: 10px; border-left: 3px solid transparent; font-weight: 500; }
         .sidebar .nav-link:hover, .sidebar .nav-link.active { color: var(--primary-color); background: #eef2ff; border-left-color: var(--primary-color); }
@@ -54,7 +54,7 @@ $showReportButton = in_array($page, ['retail', 'event', 'products', 'suppliers',
 <body>
     <div class="sidebar">
         <div class="brand d-flex align-items-center">
-            <i class="bi bi-stars me-2"></i>
+            <img src="WhatsApp%20Image%202026-03-30%20at%2021.39.04.jpeg" alt="Brand Logo" class="brand-logo me-2">
             <div>
                 <h6 class="mb-0">Sri Ram Fire Works</h6>
                 <small class="text-muted">Billing System</small>
