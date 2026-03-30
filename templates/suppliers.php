@@ -33,6 +33,180 @@ function buildSupplierItemsFromPost(): array {
     return $result;
 }
 
+if ($action === 'download_report') {
+    $currency = $settings['currency_symbol'] ?? 'LKR';
+    $rows = $pdo->query("SELECT s.supplier_code, s.name, s.status, s.order_date, s.created_at, si.item_name, si.quantity, si.unit_price FROM suppliers s LEFT JOIN supplier_items si ON si.supplier_id = s.id ORDER BY s.created_at DESC, s.id DESC, si.id ASC LIMIT 2000")->fetchAll(PDO::FETCH_ASSOC);
+
+    $drawText = function ($x, $y, $text, $fontSize, $bold) {
+        $safe = str_replace(['\\', '(', ')', "\r", "\n", "\t"], ['\\\\', '\\(', '\\)', ' ', ' ', ' '], (string) $text);
+        $font = $bold ? '/F2' : '/F1';
+        return "BT\n{$font} {$fontSize} Tf\n1 0 0 1 {$x} {$y} Tm ({$safe}) Tj\nET\n";
+    };
+
+    $drawRightText = function ($xRight, $y, $text, $fontSize, $bold) {
+        $safe = str_replace(['\\', '(', ')', "\r", "\n", "\t"], ['\\\\', '\\(', '\\)', ' ', ' ', ' '], (string) $text);
+        $font = $bold ? '/F2' : '/F1';
+        $charWidth = $fontSize * 0.52;
+        $textWidth = strlen((string) $text) * $charWidth;
+        $x = $xRight - $textWidth;
+        return "BT\n{$font} {$fontSize} Tf\n1 0 0 1 {$x} {$y} Tm ({$safe}) Tj\nET\n";
+    };
+
+    $trimCell = function ($text, $maxChars) {
+        $text = trim((string) $text);
+        if (strlen($text) <= $maxChars) {
+            return $text;
+        }
+        return substr($text, 0, max(0, $maxChars - 3)) . '...';
+    };
+
+    $reportRows = [];
+    $supplierCountSet = [];
+    $overallValue = 0.0;
+
+    foreach ($rows as $row) {
+        $supplierCode = $row['supplier_code'] ?? '';
+        $supplierName = $row['name'] ?? '';
+        $status = $row['status'] ?? 'Pending';
+        $orderDate = !empty($row['order_date']) ? date('d M Y', strtotime($row['order_date'])) : '-';
+        $itemName = $row['item_name'] ?? '';
+        $qty = (int) ($row['quantity'] ?? 0);
+        $unit = (float) ($row['unit_price'] ?? 0);
+        $lineTotal = $qty * $unit;
+
+        if (!empty($supplierCode)) {
+            $supplierCountSet[$supplierCode] = true;
+        }
+        $overallValue += $lineTotal;
+
+        $reportRows[] = [
+            'supplier' => $trimCell($supplierCode . ' - ' . $supplierName, 28),
+            'item' => $trimCell($itemName !== '' ? $itemName : '-', 22),
+            'qty' => $qty > 0 ? (string) $qty : '-',
+            'unit' => $currency . ' ' . number_format($unit, 2),
+            'total' => $currency . ' ' . number_format($lineTotal, 2),
+            'status' => $trimCell($status, 10),
+            'date' => $orderDate,
+        ];
+    }
+
+    $rowsPerPage = 28;
+    $pages = array_chunk($reportRows, $rowsPerPage);
+    if (empty($pages)) {
+        $pages = [[]];
+    }
+
+    $objects = [];
+    $objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+    $objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+    $objects[4] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>';
+
+    $pageRefs = [];
+    $nextObj = 5;
+
+    $pageWidth = 842;
+    $margin = 26;
+    $tableWidth = $pageWidth - ($margin * 2);
+    $columns = [
+        ['key' => 'supplier', 'label' => 'Supplier', 'width' => 200, 'align' => 'L'],
+        ['key' => 'item', 'label' => 'Item', 'width' => 145, 'align' => 'L'],
+        ['key' => 'qty', 'label' => 'Qty', 'width' => 45, 'align' => 'R'],
+        ['key' => 'unit', 'label' => 'Unit Price', 'width' => 115, 'align' => 'R'],
+        ['key' => 'total', 'label' => 'Line Total', 'width' => 125, 'align' => 'R'],
+        ['key' => 'status', 'label' => 'Status', 'width' => 75, 'align' => 'L'],
+        ['key' => 'date', 'label' => 'Order Date', 'width' => 85, 'align' => 'L'],
+    ];
+
+    foreach ($pages as $pageIndex => $pageRows) {
+        $pageObj = $nextObj++;
+        $contentObj = $nextObj++;
+        $pageRefs[] = $pageObj . ' 0 R';
+
+        $content = '';
+        $content .= "q\n0.07 0.38 0.73 rg\n{$margin} 558 {$tableWidth} 26 re f\nQ\n";
+        $content .= $drawText($margin + 10, 567, 'SUPPLIER DETAILED REPORT', 12, true);
+        $content .= $drawText($margin + 10, 548, 'Generated: ' . date('Y-m-d H:i:s'), 8.5, false);
+        $content .= $drawText($margin + 250, 548, 'Suppliers: ' . count($supplierCountSet), 8.5, false);
+        $content .= $drawText($margin + 360, 548, 'Rows: ' . count($reportRows), 8.5, false);
+        $content .= $drawRightText($margin + $tableWidth, 548, 'Total Value: ' . $currency . ' ' . number_format($overallValue, 2), 8.5, true);
+
+        $tableTop = 530;
+        $headerHeight = 18;
+        $rowHeight = 17;
+        $content .= "q\n0.92 0.94 0.98 rg\n{$margin} " . ($tableTop - $headerHeight) . " {$tableWidth} {$headerHeight} re f\nQ\n";
+        $content .= "q\n0.72 0.78 0.90 RG\n0.8 w\n{$margin} " . ($tableTop - $headerHeight) . " {$tableWidth} {$headerHeight} re S\nQ\n";
+
+        $x = $margin;
+        foreach ($columns as $col) {
+            $content .= "q\n0.72 0.78 0.90 RG\n0.5 w\n{$x} " . ($tableTop - $headerHeight) . " 0 {$headerHeight} re S\nQ\n";
+            $content .= $drawText($x + 4, $tableTop - 12, $col['label'], 8.5, true);
+            $x += $col['width'];
+        }
+        $content .= "q\n0.72 0.78 0.90 RG\n0.5 w\n{$x} " . ($tableTop - $headerHeight) . " 0 {$headerHeight} re S\nQ\n";
+
+        $y = $tableTop - $headerHeight;
+        foreach ($pageRows as $idx => $dataRow) {
+            $y -= $rowHeight;
+            if ($idx % 2 === 0) {
+                $content .= "q\n0.985 0.99 1 rg\n{$margin} {$y} {$tableWidth} {$rowHeight} re f\nQ\n";
+            }
+            $content .= "q\n0.86 0.89 0.95 RG\n0.4 w\n{$margin} {$y} {$tableWidth} {$rowHeight} re S\nQ\n";
+
+            $x = $margin;
+            foreach ($columns as $col) {
+                $value = (string) ($dataRow[$col['key']] ?? '');
+                if ($col['align'] === 'R') {
+                    $content .= $drawRightText($x + $col['width'] - 4, $y + 5, $value, 8, false);
+                } else {
+                    $content .= $drawText($x + 4, $y + 5, $value, 8, false);
+                }
+                $x += $col['width'];
+                $content .= "q\n0.86 0.89 0.95 RG\n0.4 w\n{$x} {$y} 0 {$rowHeight} re S\nQ\n";
+            }
+        }
+
+        $content .= $drawRightText($margin + $tableWidth, 22, 'Page ' . ($pageIndex + 1) . ' of ' . count($pages), 8, false);
+
+        $objects[$contentObj] = "<< /Length " . strlen($content) . " >>\nstream\n" . $content . "\nendstream";
+        $objects[$pageObj] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ' . $contentObj . ' 0 R >>';
+    }
+
+    $objects[2] = '<< /Type /Pages /Kids [' . implode(' ', $pageRefs) . '] /Count ' . count($pageRefs) . ' >>';
+
+    ksort($objects);
+    $maxObj = max(array_keys($objects));
+    $pdf = "%PDF-1.4\n";
+    $offsets = [];
+    for ($i = 1; $i <= $maxObj; $i++) {
+        if (!isset($objects[$i])) {
+            continue;
+        }
+        $offsets[$i] = strlen($pdf);
+        $pdf .= $i . " 0 obj\n" . $objects[$i] . "\nendobj\n";
+    }
+
+    $xrefOffset = strlen($pdf);
+    $pdf .= "xref\n";
+    $pdf .= '0 ' . ($maxObj + 1) . "\n";
+    $pdf .= "0000000000 65535 f \n";
+    for ($i = 1; $i <= $maxObj; $i++) {
+        $off = $offsets[$i] ?? 0;
+        $pdf .= sprintf('%010d 00000 n ', $off) . "\n";
+    }
+    $pdf .= "trailer\n";
+    $pdf .= '<< /Size ' . ($maxObj + 1) . ' /Root 1 0 R >>' . "\n";
+    $pdf .= "startxref\n";
+    $pdf .= $xrefOffset . "\n";
+    $pdf .= "%%EOF";
+
+    $fileName = 'supplier-detailed-report-' . date('Ymd-His') . '.pdf';
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: attachment; filename=' . $fileName);
+    header('Content-Length: ' . strlen($pdf));
+    echo $pdf;
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'store') {
         $supplierCode = trim($_POST['supplier_id'] ?? '');
@@ -380,7 +554,7 @@ if ($action === 'create' || $action === 'edit') {
             </table>
         </div>
         <div class="text-end mt-4">
-            <button class="btn btn-primary" onclick="window.print()"><i class="bi bi-download me-2"></i>Download Report</button>
+            <a class="btn btn-primary" href="?page=suppliers&action=download_report"><i class="bi bi-download me-2"></i>Download Report</a>
         </div>
     </div>
 </div>

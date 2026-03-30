@@ -466,25 +466,67 @@ if ($action === 'download') {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if ($action === 'store') {
+    if ($action === 'clear_before') {
+        $clearBeforeDate = trim($_POST['clear_before_date'] ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $clearBeforeDate)) {
+            header('Location: ?page=event&clear_error=1');
+            exit;
+        }
+
+        try {
+            $idsStmt = $pdo->prepare("SELECT id FROM bills WHERE type = 'wholesale' AND DATE(created_at) < ?");
+            $idsStmt->execute([$clearBeforeDate]);
+            $billIds = $idsStmt->fetchAll(PDO::FETCH_COLUMN);
+            $clearedCount = count($billIds);
+
+            if ($clearedCount > 0) {
+                $pdo->beginTransaction();
+                $placeholders = implode(',', array_fill(0, $clearedCount, '?'));
+
+                $deleteItemsStmt = $pdo->prepare("DELETE FROM bill_items WHERE bill_id IN ($placeholders)");
+                $deleteItemsStmt->execute($billIds);
+
+                $deleteBillsStmt = $pdo->prepare("DELETE FROM bills WHERE id IN ($placeholders)");
+                $deleteBillsStmt->execute($billIds);
+
+                $pdo->commit();
+            }
+
+            header('Location: ?page=event&cleared=' . intval($clearedCount) . '&before=' . urlencode($clearBeforeDate));
+            exit;
+        } catch (Exception $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            header('Location: ?page=event&clear_error=1');
+            exit;
+        }
+    } elseif ($action === 'store') {
         $items = $_POST['items'] ?? [];
         $customer_name = trim($_POST['customer_name'] ?? '');
         $customer_phone = trim($_POST['customer_phone'] ?? '');
+        $event_date = trim($_POST['event_date'] ?? '');
+        $event_address = trim($_POST['event_address'] ?? '');
+        $event_notes = trim($_POST['event_notes'] ?? '');
+
+        if ($customer_name === '' || $customer_phone === '' || $event_date === '' || $event_address === '') {
+            $_SESSION['error_message'] = 'Customer Name, Customer Phone, Event Date, and Event Address are required.';
+            header('Location: ?page=event&action=create');
+            exit();
+        }
+
         // Validate phone number: only 10 digits
         if ($customer_phone !== '') {
             $phone_digits = preg_replace('/\D/', '', $customer_phone);
             if (strlen($phone_digits) !== 10) {
                 $_SESSION['error_message'] = 'Phone number must be exactly 10 digits';
-                header('Location: index.php?page=event');
+                header('Location: ?page=event&action=create');
                 exit();
             }
             $customer_phone = $phone_digits;
         }
         $discountPercent = floatval($_POST['discount_percentage'] ?? 0);
         $paid = floatval($_POST['paid_amount'] ?? 0);
-        $event_date = trim($_POST['event_date'] ?? '');
-        $event_address = trim($_POST['event_address'] ?? '');
-        $event_notes = trim($_POST['event_notes'] ?? '');
 
         if (!empty($items)) {
             $subtotal = 0;
@@ -555,6 +597,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $items = $_POST['items'] ?? [];
         $customer_name = trim($_POST['customer_name'] ?? '');
         $customer_phone = trim($_POST['customer_phone'] ?? '');
+        $event_date = trim($_POST['event_date'] ?? '');
+        $event_address = trim($_POST['event_address'] ?? '');
+        $event_notes = trim($_POST['event_notes'] ?? '');
+
+        if ($customer_name === '' || $customer_phone === '' || $event_date === '' || $event_address === '') {
+            $_SESSION['error_message'] = 'Customer Name, Customer Phone, Event Date, and Event Address are required.';
+            header('Location: ?page=event&action=edit&id=' . $id);
+            exit();
+        }
+
         // Validate phone number: only 10 digits
         if ($customer_phone !== '') {
             $phone_digits = preg_replace('/\D/', '', $customer_phone);
@@ -567,9 +619,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $discountPercent = floatval($_POST['discount_percentage'] ?? 0);
         $paid = floatval($_POST['paid_amount'] ?? 0);
-        $event_date = trim($_POST['event_date'] ?? '');
-        $event_address = trim($_POST['event_address'] ?? '');
-        $event_notes = trim($_POST['event_notes'] ?? '');
 
         if ($id > 0 && !empty($items)) {
             $existingBillStmt = $pdo->prepare("SELECT id FROM bills WHERE id = ? AND type = 'wholesale'");
@@ -657,10 +706,84 @@ $eventDateFrom = $filters['event_date_from'];
 $eventDateTo = $filters['event_date_to'];
 $minTotal = $filters['min_total'];
 $maxTotal = $filters['max_total'];
+$period = $_GET['period'] ?? '';
+if (!in_array($period, ['today', 'month'], true)) {
+    $period = '';
+}
+if ($period === 'today') {
+    $todayDate = date('Y-m-d');
+    $bills = array_values(array_filter($bills, function ($bill) use ($todayDate) {
+        return isset($bill['created_at']) && date('Y-m-d', strtotime($bill['created_at'])) === $todayDate;
+    }));
+} elseif ($period === 'month') {
+    $currentYearMonth = date('Y-m');
+    $bills = array_values(array_filter($bills, function ($bill) use ($currentYearMonth) {
+        return isset($bill['created_at']) && date('Y-m', strtotime($bill['created_at'])) === $currentYearMonth;
+    }));
+}
 ?>
-<div class="d-flex justify-content-between align-items-center mb-4">
+<?php if (isset($_GET['cleared'])): ?>
+<div class="alert alert-success alert-dismissible fade show" role="alert">
+    <i class="bi bi-check-circle me-2"></i>
+    Cleared <?= intval($_GET['cleared']) ?> event bill(s) before <?= htmlspecialchars($_GET['before'] ?? '') ?>.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php endif; ?>
+<?php if (isset($_GET['clear_error'])): ?>
+<div class="alert alert-danger alert-dismissible fade show" role="alert">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    Failed to clear event bills. Please check the date and try again.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php endif; ?>
+<style>
+    .bill-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+    }
+    .bill-toolbar-right {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .clear-date-form {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: #fff;
+        border: 1px solid #f3d1d6;
+        border-radius: 12px;
+        padding: 8px;
+    }
+    .clear-date-form .form-control {
+        min-width: 170px;
+    }
+    .clear-date-form .btn {
+        white-space: nowrap;
+    }
+    @media (max-width: 768px) {
+        .bill-toolbar-right {
+            width: 100%;
+        }
+        .clear-date-form {
+            width: 100%;
+        }
+        .clear-date-form .form-control,
+        .clear-date-form .btn,
+        .bill-toolbar-right .dropdown,
+        .bill-toolbar-right > a {
+            width: 100%;
+        }
+    }
+</style>
+
+<div class="bill-toolbar mb-4">
     <h4 class="mb-0">Event Bills</h4>
-    <div class="d-flex gap-2">
+    <div class="bill-toolbar-right">
         <div class="dropdown">
             <button class="btn btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
                 <i class="bi bi-download me-2"></i>Download Report
@@ -720,9 +843,19 @@ $maxTotal = $filters['max_total'];
                 </form>
             </div>
         </div>
-        <a href="?page=event&action=create" class="btn btn-primary btn-lg"><i class="bi bi-plus-lg me-2"></i>New Event Bill</a>
+        <a href="?page=event&action=create" class="btn btn-primary"><i class="bi bi-plus-lg me-2"></i>New Event Bill</a>
     </div>
 </div>
+
+<?php if ($period === 'today' || $period === 'month'): ?>
+<div class="alert alert-info d-flex justify-content-between align-items-center">
+    <span>
+        <i class="bi bi-funnel me-2"></i>
+        Showing <?= $period === 'today' ? "today's" : "this month's" ?> event bills
+    </span>
+    <a href="?page=event" class="btn btn-sm btn-outline-info">Clear Filter</a>
+</div>
+<?php endif; ?>
 
 <div class="card">
     <div class="card-body">
@@ -751,6 +884,15 @@ $maxTotal = $filters['max_total'];
             </tbody>
         </table>
     </div>
+</div>
+
+<div class="d-flex justify-content-end mt-3">
+    <form method="POST" action="?page=event&action=clear_before" class="d-flex gap-2 align-items-center" data-confirm-message="CAUTION: This will permanently delete event bills before the selected date. This action cannot be undone. Continue?" data-confirm-title="Confirm Event Bill Deletion">
+        <div class="clear-date-form">
+            <input type="date" name="clear_before_date" class="form-control form-control-sm" required title="Delete bills before this date">
+            <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-2"></i>Clear Before Date</button>
+        </div>
+    </form>
 </div>
 
 <?php elseif ($action === 'create' || $action === 'edit'): ?>
@@ -828,6 +970,13 @@ if ($isEdit) {
     <a href="?page=event" class="btn btn-secondary"><i class="bi bi-arrow-left me-2"></i>Back</a>
 </div>
 
+<?php if (!empty($_SESSION['error_message'])): ?>
+<div class="alert alert-danger alert-dismissible fade show" role="alert">
+    <i class="bi bi-exclamation-triangle me-2"></i><?= htmlspecialchars($_SESSION['error_message']) ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php unset($_SESSION['error_message']); endif; ?>
+
 <form method="POST" action="?page=event&action=<?= $isEdit ? 'update&id=' . intval($editBill['id']) : 'store' ?>" id="billForm">
     <div class="row">
         <div class="col-lg-8">
@@ -837,19 +986,19 @@ if ($isEdit) {
                     <div class="row g-3">
                         <div class="col-md-6">
                             <label class="form-label">Customer Name</label>
-                            <input type="text" name="customer_name" class="form-control" placeholder="Enter customer name" value="<?= htmlspecialchars($customer_name_value) ?>">
+                            <input type="text" name="customer_name" class="form-control" placeholder="Enter customer name" value="<?= htmlspecialchars($customer_name_value) ?>" required>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Customer Phone</label>
-                            <input type="text" name="customer_phone" class="form-control" placeholder="Enter 10-digit phone number" pattern="\d{10}" inputmode="numeric" value="<?= htmlspecialchars($customer_phone_value) ?>">
+                            <input type="text" name="customer_phone" class="form-control" placeholder="Enter 10-digit phone number" pattern="\d{10}" inputmode="numeric" value="<?= htmlspecialchars($customer_phone_value) ?>" required>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Event Date</label>
-                            <input type="date" name="event_date" class="form-control" value="<?= htmlspecialchars($event_date_value) ?>">
+                            <input type="date" name="event_date" class="form-control" value="<?= htmlspecialchars($event_date_value) ?>" required>
                         </div>
                         <div class="col-md-8">
                             <label class="form-label">Event Address</label>
-                            <input type="text" name="event_address" class="form-control" placeholder="Enter event address" value="<?= htmlspecialchars($event_address_value) ?>">
+                            <input type="text" name="event_address" class="form-control" placeholder="Enter event address" value="<?= htmlspecialchars($event_address_value) ?>" required>
                         </div>
                         <div class="col-md-4">
                             <label class="form-label">Notes</label>
@@ -1220,6 +1369,8 @@ $billEventAddress = $extractEventAddressFromNotes($bill['notes'] ?? '') ?: '-';
 $items = $pdo->prepare("SELECT bi.*, p.name as product_name, p.sku FROM bill_items bi LEFT JOIN products p ON bi.product_id = p.id WHERE bi.bill_id = ?");
 $items->execute([$id]);
 $items = $items->fetchAll();
+$brandLogoPath = 'WhatsApp Image 2026-03-30 at 21.39.04.jpeg';
+$brandLogoSrc = str_replace(' ', '%20', $brandLogoPath);
 ?>
 <!DOCTYPE html>
 <html>
@@ -1229,14 +1380,21 @@ $items = $items->fetchAll();
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: Arial, sans-serif; font-size: 12px; padding: 20px; }
         .invoice { max-width: 800px; margin: 0 auto; }
-        .header { text-align: center; border-bottom: 3px solid #0d6efd; padding-bottom: 15px; margin-bottom: 20px; }
-        .company-name { font-size: 24px; font-weight: bold; color: #0d6efd; }
+        .header { border-bottom: 2px solid #333; padding-bottom: 12px; margin-bottom: 20px; }
+        .letterhead { display: grid; grid-template-columns: 130px 1fr 130px; column-gap: 16px; align-items: center; }
+        .logo-wrap img { width: 130px; height: 130px; object-fit: cover; border-radius: 50%; border: 1px solid #444; }
+        .logo-spacer { width: 130px; height: 130px; visibility: hidden; }
+        .brand-block { flex: 1; text-align: center; }
+        .brand-title { font-size: 40px; font-weight: 800; letter-spacing: 1px; line-height: 1.05; }
+        .brand-line { font-size: 16px; line-height: 1.3; margin-top: 3px; }
+        .reg-line { margin-top: 8px; font-weight: 600; text-align: center; }
+        .invoice-tag { margin-top: 10px; display: inline-block; background: #333; color: #fff; padding: 4px 14px; font-weight: bold; }
         table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-        th { background: #0d6efd; color: white; padding: 10px; text-align: left; }
+        th { background: #333; color: white; padding: 10px; text-align: left; }
         td { padding: 10px; border-bottom: 1px solid #ddd; }
         .totals { float: right; width: 300px; }
         .totals-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
-        .grand-total { font-size: 16px; font-weight: bold; color: #0d6efd; border-top: 2px solid #0d6efd; }
+        .grand-total { font-size: 16px; font-weight: bold; border-top: 2px solid #333; }
         .footer { clear: both; margin-top: 40px; text-align: center; font-size: 10px; color: #666; }
         @media print { .no-print { display: none; } }
     </style>
@@ -1244,9 +1402,17 @@ $items = $items->fetchAll();
 <body>
     <div class="invoice">
         <div class="header">
-            <div class="company-name"><?= htmlspecialchars($settings['company_name'] ?? 'Sri Ram Fire Works') ?></div>
-            <div><?= htmlspecialchars($settings['company_address'] ?? '') ?></div>
-            <h2 style="margin-top:10px; background:#0d6efd; color:white; display:inline-block; padding:5px 20px">EVENT INVOICE</h2>
+            <div class="letterhead">
+                <div class="logo-wrap"><img src="<?= htmlspecialchars($brandLogoSrc) ?>" alt="Sriram Fireworks Logo"></div>
+                <div class="brand-block">
+                    <div class="brand-title">SRIRAM FIREWORKS</div>
+                    <div class="brand-line">No. 319, Galmankada, Kimbulapitiya.</div>
+                    <div class="brand-line">Prop : K.S.S.K. Fernando. Tel : 077 877 92 71</div>
+                    <div class="brand-line reg-line">Reg : No WAA/4327</div>
+                </div>
+                <div class="logo-spacer" aria-hidden="true"></div>
+            </div>
+            <div style="text-align:center"><span class="invoice-tag">EVENT INVOICE</span></div>
         </div>
 
         <div style="display:flex; justify-content:space-between; margin-bottom:20px">
@@ -1265,15 +1431,16 @@ $items = $items->fetchAll();
 
         <div class="totals">
             <div class="totals-row"><span>Subtotal:</span><span><?= $currency ?> <?= number_format($bill['subtotal'], 2) ?></span></div>
+            <?php if (floatval($bill['discount_amount']) > 0): ?>
             <div class="totals-row"><span>Discount (<?= number_format($billDiscountPercent, 2) ?>%):</span><span>- <?= $currency ?> <?= number_format($bill['discount_amount'], 2) ?></span></div>
-            <div class="totals-row"><span>Tax:</span><span><?= $currency ?> <?= number_format($bill['tax_amount'], 2) ?></span></div>
+            <?php endif; ?>
             <div class="totals-row grand-total"><span>Grand Total:</span><span><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></span></div>
             <div class="totals-row"><span>Advance Paid:</span><span><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></span></div>
             <div class="totals-row"><span>Balance Due:</span><span><?= $currency ?> <?= number_format($bill['total_amount'] - $bill['paid_amount'], 2) ?></span></div>
         </div>
 
         <div class="footer"><p>Thank you for your business!</p></div>
-        <div class="no-print" style="text-align:center; margin-top:20px"><button onclick="window.print()" style="padding:10px 30px; background:#0d6efd; color:white; border:none; border-radius:5px; cursor:pointer">Print Invoice</button></div>
+        <div class="no-print" style="text-align:center; margin-top:20px"><button onclick="window.print()" style="padding:10px 30px; background:#333; color:white; border:none; border-radius:5px; cursor:pointer">Print Invoice</button></div>
     </div>
 </body>
 </html>

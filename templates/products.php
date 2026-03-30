@@ -22,9 +22,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sku = trim($_POST['sku']);
         $name = trim($_POST['name']);
         $category_id = intval($_POST['category_id']);
-        $cost_price = floatval($_POST['cost_price']);
-        $selling_price = floatval($_POST['selling_price']);
-        $wholesale_price = floatval($_POST['wholesale_price'] ?? $selling_price);
+        $price = floatval($_POST['price'] ?? ($_POST['selling_price'] ?? 0));
+        $cost_price = $price;
+        $selling_price = $price;
+        $wholesale_price = $price;
         $stock_quantity = intval($_POST['stock_quantity']);
         $min_stock_level = intval($_POST['min_stock_level'] ?? 10);
         $description = trim($_POST['description'] ?? '');
@@ -58,9 +59,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sku = trim($_POST['sku']);
         $name = trim($_POST['name']);
         $category_id = intval($_POST['category_id']);
-        $cost_price = floatval($_POST['cost_price']);
-        $selling_price = floatval($_POST['selling_price']);
-        $wholesale_price = floatval($_POST['wholesale_price'] ?? $selling_price);
+        $price = floatval($_POST['price'] ?? ($_POST['selling_price'] ?? 0));
+        $cost_price = $price;
+        $selling_price = $price;
+        $wholesale_price = $price;
         $stock_quantity = intval($_POST['stock_quantity']);
         $min_stock_level = intval($_POST['min_stock_level'] ?? 10);
         $description = trim($_POST['description'] ?? '');
@@ -110,6 +112,10 @@ $categories = $demoMode
     ? $_SESSION['mock_categories']
     : $pdo->query("SELECT * FROM categories ORDER BY name")->fetchAll();
 $selectedCategory = intval($_GET['category'] ?? 0);
+$stockFilter = $_GET['stock_filter'] ?? 'all';
+if (!in_array($stockFilter, ['all', 'active', 'low'], true)) {
+    $stockFilter = 'all';
+}
 ?>
 
 <?php if (isset($_GET['success'])): ?>
@@ -171,6 +177,12 @@ $selectedCategory = intval($_GET['category'] ?? 0);
             </a>
             <?php endforeach; ?>
         </div>
+        <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
+            <span class="fw-semibold me-2">Stock Filter:</span>
+            <a href="?page=products<?= $selectedCategory > 0 ? '&category=' . $selectedCategory : '' ?>" class="btn btn-sm <?= $stockFilter === 'all' ? 'btn-primary' : 'btn-outline-primary' ?>">All</a>
+            <a href="?page=products&stock_filter=active<?= $selectedCategory > 0 ? '&category=' . $selectedCategory : '' ?>" class="btn btn-sm <?= $stockFilter === 'active' ? 'btn-success' : 'btn-outline-success' ?>">Active</a>
+            <a href="?page=products&stock_filter=low<?= $selectedCategory > 0 ? '&category=' . $selectedCategory : '' ?>" class="btn btn-sm <?= $stockFilter === 'low' ? 'btn-warning text-dark' : 'btn-outline-warning' ?>">Low Stock</a>
+        </div>
         <small class="text-muted d-block mt-2">Categories are available here to make stock browsing and billing faster.</small>
     </div>
 </div>
@@ -179,7 +191,7 @@ $selectedCategory = intval($_GET['category'] ?? 0);
     <div class="card-body">
         <table class="table table-striped table-hover">
             <thead class="table-dark">
-                <tr><th>SKU</th><th>Stock Item</th><th>Category</th><th class="text-end">Cost</th><th class="text-end">Retail</th><th class="text-end">Event</th><th class="text-center">Stock</th><th>Status</th><th class="text-end">Actions</th></tr>
+                <tr><th>SKU</th><th>Stock Item</th><th>Category</th><th class="text-end">Price</th><th class="text-center">Stock</th><th>Status</th><th class="text-end">Actions</th></tr>
             </thead>
             <tbody>
                 <?php
@@ -195,6 +207,15 @@ $selectedCategory = intval($_GET['category'] ?? 0);
                             return (int) ($row['category_id'] ?? 0) === $selectedCategory;
                         }));
                     }
+                    if ($stockFilter === 'active') {
+                        $products = array_values(array_filter($products, function ($row) {
+                            return (int) ($row['is_active'] ?? 0) === 1;
+                        }));
+                    } elseif ($stockFilter === 'low') {
+                        $products = array_values(array_filter($products, function ($row) {
+                            return (int) ($row['is_active'] ?? 0) === 1 && (int) ($row['stock_quantity'] ?? 0) <= (int) ($row['min_stock_level'] ?? 0);
+                        }));
+                    }
 
                     foreach ($products as &$productRow) {
                         $categoryId = (int) ($productRow['category_id'] ?? 0);
@@ -202,14 +223,21 @@ $selectedCategory = intval($_GET['category'] ?? 0);
                     }
                     unset($productRow);
                 } else {
-                    $productSql = "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id";
+                    $productSql = "SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1";
+                    $productParams = [];
                     if ($selectedCategory > 0) {
-                        $stmt = $pdo->prepare($productSql . " WHERE p.category_id = ? ORDER BY p.name");
-                        $stmt->execute([$selectedCategory]);
-                        $products = $stmt->fetchAll();
-                    } else {
-                        $products = $pdo->query($productSql . " ORDER BY p.name")->fetchAll();
+                        $productSql .= " AND p.category_id = ?";
+                        $productParams[] = $selectedCategory;
                     }
+                    if ($stockFilter === 'active') {
+                        $productSql .= " AND p.is_active = 1";
+                    } elseif ($stockFilter === 'low') {
+                        $productSql .= " AND p.is_active = 1 AND p.stock_quantity <= p.min_stock_level";
+                    }
+                    $productSql .= " ORDER BY p.name";
+                    $stmt = $pdo->prepare($productSql);
+                    $stmt->execute($productParams);
+                    $products = $stmt->fetchAll();
                 }
                 foreach ($products as $p):
                 $stockClass = $p['stock_quantity'] <= 0 ? 'bg-danger' : ($p['stock_quantity'] <= $p['min_stock_level'] ? 'bg-warning text-dark' : 'bg-success');
@@ -218,9 +246,7 @@ $selectedCategory = intval($_GET['category'] ?? 0);
                     <td><code><?= htmlspecialchars($p['sku']) ?></code></td>
                     <td><strong><?= htmlspecialchars($p['name']) ?></strong></td>
                     <td><?= htmlspecialchars($p['category_name'] ?? 'Uncategorized') ?></td>
-                    <td class="text-end text-muted"><?= $currency ?> <?= number_format($p['cost_price'], 2) ?></td>
                     <td class="text-end"><?= $currency ?> <?= number_format($p['selling_price'], 2) ?></td>
-                    <td class="text-end"><?= $currency ?> <?= number_format($p['wholesale_price'], 2) ?></td>
                     <td class="text-center"><span class="badge <?= $stockClass ?>"><?= $p['stock_quantity'] ?></span></td>
                     <td><span class="badge bg-<?= $p['is_active'] ? 'success' : 'secondary' ?>"><?= $p['is_active'] ? 'Active' : 'Inactive' ?></span></td>
                     <td class="text-end">
@@ -229,7 +255,7 @@ $selectedCategory = intval($_GET['category'] ?? 0);
                     </td>
                 </tr>
                 <?php endforeach; ?>
-                <?php if (empty($products)): ?><tr><td colspan="9" class="text-center text-muted py-4">No products found</td></tr><?php endif; ?>
+                <?php if (empty($products)): ?><tr><td colspan="7" class="text-center text-muted py-4">No products found</td></tr><?php endif; ?>
             </tbody>
         </table>
     </div>
@@ -332,9 +358,7 @@ function downloadStockPdfReport() {
             String(row.sku || ''),
             String(row.name || ''),
             String(row.category_name || 'Uncategorized'),
-            stockCurrency + ' ' + Number(row.cost_price || 0).toFixed(2),
             stockCurrency + ' ' + Number(row.selling_price || 0).toFixed(2),
-            stockCurrency + ' ' + Number(row.wholesale_price || 0).toFixed(2),
             String(stock),
             stockStatus,
             Number(row.is_active || 0) === 1 ? 'Active' : 'Inactive'
@@ -343,15 +367,13 @@ function downloadStockPdfReport() {
 
     doc.autoTable({
         startY: 72,
-        head: [['SKU', 'Stock Item', 'Category', 'Cost', 'Retail', 'Event', 'Qty', 'Stock Level', 'Status']],
+        head: [['SKU', 'Stock Item', 'Category', 'Price', 'Qty', 'Stock Level', 'Status']],
         body: body,
         styles: { fontSize: 9, cellPadding: 6 },
         headStyles: { fillColor: [33, 37, 41] },
         columnStyles: {
             3: { halign: 'right' },
-            4: { halign: 'right' },
-            5: { halign: 'right' },
-            6: { halign: 'center' }
+            4: { halign: 'center' }
         }
     });
 
@@ -393,17 +415,9 @@ function downloadStockPdfReport() {
                 </div>
             </div>
             <div class="row">
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Cost Price (<?= $currency ?>)</label>
-                    <input type="number" name="cost_price" class="form-control" step="0.01" min="0" value="0">
-                </div>
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Selling Price (<?= $currency ?>) <span class="text-danger">*</span></label>
-                    <input type="number" name="selling_price" class="form-control" step="0.01" min="0.01" required>
-                </div>
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Event Price (<?= $currency ?>)</label>
-                    <input type="number" name="wholesale_price" class="form-control" step="0.01" min="0">
+                <div class="col-md-12 mb-3">
+                    <label class="form-label">Price (<?= $currency ?>) <span class="text-danger">*</span></label>
+                    <input type="number" name="price" class="form-control" step="0.01" min="0.01" required>
                 </div>
             </div>
             <div class="row">
@@ -475,17 +489,9 @@ if (!$product) { echo '<div class="alert alert-danger">Product not found</div>';
                 </div>
             </div>
             <div class="row">
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Cost Price (<?= $currency ?>)</label>
-                    <input type="number" name="cost_price" class="form-control" step="0.01" min="0" value="<?= $product['cost_price'] ?>">
-                </div>
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Selling Price (<?= $currency ?>) <span class="text-danger">*</span></label>
-                    <input type="number" name="selling_price" class="form-control" step="0.01" min="0.01" required value="<?= $product['selling_price'] ?>">
-                </div>
-                <div class="col-md-4 mb-3">
-                    <label class="form-label">Event Price (<?= $currency ?>)</label>
-                    <input type="number" name="wholesale_price" class="form-control" step="0.01" min="0" value="<?= $product['wholesale_price'] ?>">
+                <div class="col-md-12 mb-3">
+                    <label class="form-label">Price (<?= $currency ?>) <span class="text-danger">*</span></label>
+                    <input type="number" name="price" class="form-control" step="0.01" min="0.01" required value="<?= $product['selling_price'] ?>">
                 </div>
             </div>
             <div class="row">

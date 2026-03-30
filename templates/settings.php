@@ -101,34 +101,6 @@ include 'header.php';
         </div>
     </div>
 
-    <div class="card mb-4">
-        <div class="card-header"><i class="bi bi-shield-check me-2"></i>Quick Actions</div>
-        <div class="card-body">
-            <div class="row">
-                <div class="col-md-3 mb-3">
-                    <div class="d-grid">
-                        <a href="?page=categories" class="btn btn-outline-primary"><i class="bi bi-tags me-2"></i>Manage Categories</a>
-                    </div>
-                </div>
-                <div class="col-md-3 mb-3">
-                    <div class="d-grid">
-                        <a href="?page=products" class="btn btn-outline-success"><i class="bi bi-box-seam me-2"></i>Manage Stocks</a>
-                    </div>
-                </div>
-                <div class="col-md-3 mb-3">
-                    <div class="d-grid">
-                        <a href="?page=customers" class="btn btn-outline-info"><i class="bi bi-people me-2"></i>Manage Customers</a>
-                    </div>
-                </div>
-                <div class="col-md-3 mb-3">
-                    <div class="d-grid">
-                        <a href="?page=reports" class="btn btn-outline-warning"><i class="bi bi-graph-up me-2"></i>View Reports</a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <div class="d-flex gap-2 mb-4">
         <button type="submit" class="btn btn-primary btn-lg"><i class="bi bi-check-lg me-2"></i>Save Settings</button>
     </div>

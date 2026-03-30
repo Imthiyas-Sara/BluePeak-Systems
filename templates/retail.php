@@ -253,7 +253,42 @@ if ($action === 'download') {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if ($action === 'store') {
+    if ($action === 'clear_before') {
+        $clearBeforeDate = trim($_POST['clear_before_date'] ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $clearBeforeDate)) {
+            header('Location: ?page=retail&clear_error=1');
+            exit;
+        }
+
+        try {
+            $idsStmt = $pdo->prepare("SELECT id FROM bills WHERE type = 'retail' AND DATE(created_at) < ?");
+            $idsStmt->execute([$clearBeforeDate]);
+            $billIds = $idsStmt->fetchAll(PDO::FETCH_COLUMN);
+            $clearedCount = count($billIds);
+
+            if ($clearedCount > 0) {
+                $pdo->beginTransaction();
+                $placeholders = implode(',', array_fill(0, $clearedCount, '?'));
+
+                $deleteItemsStmt = $pdo->prepare("DELETE FROM bill_items WHERE bill_id IN ($placeholders)");
+                $deleteItemsStmt->execute($billIds);
+
+                $deleteBillsStmt = $pdo->prepare("DELETE FROM bills WHERE id IN ($placeholders)");
+                $deleteBillsStmt->execute($billIds);
+
+                $pdo->commit();
+            }
+
+            header('Location: ?page=retail&cleared=' . intval($clearedCount) . '&before=' . urlencode($clearBeforeDate));
+            exit;
+        } catch (Exception $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            header('Location: ?page=retail&clear_error=1');
+            exit;
+        }
+    } elseif ($action === 'store') {
         $customer_id = $_POST['customer_id'] ?: null;
         $items = $_POST['items'] ?? [];
         $discountPercent = floatval($_POST['discount_percentage'] ?? ($_POST['discount_amount'] ?? 0));
@@ -365,9 +400,74 @@ include 'header.php';
 ?>
 
 <?php if ($action === 'index'): ?>
-<div class="d-flex justify-content-between align-items-center mb-4">
+<?php
+$period = $_GET['period'] ?? '';
+if (!in_array($period, ['today', 'month'], true)) {
+    $period = '';
+}
+?>
+<?php if (isset($_GET['cleared'])): ?>
+<div class="alert alert-success alert-dismissible fade show" role="alert">
+    <i class="bi bi-check-circle me-2"></i>
+    Cleared <?= intval($_GET['cleared']) ?> retail bill(s) before <?= htmlspecialchars($_GET['before'] ?? '') ?>.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php endif; ?>
+<?php if (isset($_GET['clear_error'])): ?>
+<div class="alert alert-danger alert-dismissible fade show" role="alert">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    Failed to clear retail bills. Please check the date and try again.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php endif; ?>
+<style>
+    .bill-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+    }
+    .bill-toolbar-right {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .clear-date-form {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: #fff;
+        border: 1px solid #f3d1d6;
+        border-radius: 12px;
+        padding: 8px;
+    }
+    .clear-date-form .form-control {
+        min-width: 170px;
+    }
+    .clear-date-form .btn {
+        white-space: nowrap;
+    }
+    @media (max-width: 768px) {
+        .bill-toolbar-right {
+            width: 100%;
+        }
+        .clear-date-form {
+            width: 100%;
+        }
+        .clear-date-form .form-control,
+        .clear-date-form .btn,
+        .bill-toolbar-right .dropdown,
+        .bill-toolbar-right > a {
+            width: 100%;
+        }
+    }
+</style>
+
+<div class="bill-toolbar mb-4">
     <h4 class="mb-0">Retail Bills</h4>
-    <div class="d-flex gap-2">
+    <div class="bill-toolbar-right">
         <div class="dropdown">
             <button class="btn btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
                 <i class="bi bi-download me-2"></i>Download Report
@@ -423,9 +523,19 @@ include 'header.php';
                 </form>
             </div>
         </div>
-        <a href="?page=retail&action=create" class="btn btn-primary btn-lg"><i class="bi bi-plus-lg me-2"></i>New Retail Bill</a>
+        <a href="?page=retail&action=create" class="btn btn-primary"><i class="bi bi-plus-lg me-2"></i>New Retail Bill</a>
     </div>
 </div>
+
+<?php if ($period === 'today' || $period === 'month'): ?>
+<div class="alert alert-info d-flex justify-content-between align-items-center">
+    <span>
+        <i class="bi bi-funnel me-2"></i>
+        Showing <?= $period === 'today' ? "today's" : "this month's" ?> retail bills
+    </span>
+    <a href="?page=retail" class="btn btn-sm btn-outline-info">Clear Filter</a>
+</div>
+<?php endif; ?>
 
 <div class="card">
     <div class="card-body">
@@ -433,7 +543,17 @@ include 'header.php';
             <thead><tr><th>Bill No</th><th>Date</th><th>Customer</th><th class="text-end">Total</th><th class="text-end">Paid</th><th class="text-end">Balance</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
             <tbody>
                 <?php
-                $bills = $pdo->query("SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail' ORDER BY b.created_at DESC LIMIT 50")->fetchAll();
+                $query = "SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id WHERE b.type = 'retail'";
+                $params = [];
+                if ($period === 'today') {
+                    $query .= " AND DATE(b.created_at) = CURRENT_DATE()";
+                } elseif ($period === 'month') {
+                    $query .= " AND MONTH(b.created_at) = MONTH(CURRENT_DATE()) AND YEAR(b.created_at) = YEAR(CURRENT_DATE())";
+                }
+                $query .= " ORDER BY b.created_at DESC LIMIT 50";
+                $stmt = $pdo->prepare($query);
+                $stmt->execute($params);
+                $bills = $stmt->fetchAll();
                 foreach ($bills as $bill):
                     $balanceAmount = floatval($bill['paid_amount']) - floatval($bill['total_amount']);
                 ?>
@@ -456,6 +576,15 @@ include 'header.php';
             </tbody>
         </table>
     </div>
+</div>
+
+<div class="d-flex justify-content-end mt-3">
+    <form method="POST" action="?page=retail&action=clear_before" class="d-flex gap-2 align-items-center" data-confirm-message="CAUTION: This will permanently delete retail bills before the selected date. This action cannot be undone. Continue?" data-confirm-title="Confirm Retail Bill Deletion">
+        <div class="clear-date-form">
+            <input type="date" name="clear_before_date" class="form-control form-control-sm" required title="Delete bills before this date">
+            <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-2"></i>Clear Before Date</button>
+        </div>
+    </form>
 </div>
 
 <script>
@@ -647,6 +776,9 @@ $selectedCustomerId = $isEdit ? ($editBill['customer_id'] ?? '') : '';
                         <span>Paid Amount:</span>
                         <div class="input-group" style="width:140px"><span class="input-group-text"><?= $currency ?></span><input type="number" name="paid_amount" id="paidAmount" class="form-control form-control-sm" value="<?= number_format($initialPaidAmount, 2, '.', '') ?>" min="0" step="0.01"></div>
                     </div>
+                    <div class="d-grid mb-2">
+                        <button type="button" class="btn btn-outline-success btn-sm" id="payFullBtn"><i class="bi bi-cash-coin me-1"></i>Paid Full Amount</button>
+                    </div>
                     <div class="d-flex justify-content-between mb-1"><strong>Balance:</strong><strong id="balanceAmount" class="text-danger"><?= $currency ?> 0.00</strong></div>
                 </div>
             </div>
@@ -675,6 +807,7 @@ const editItemsData = <?= json_encode(array_map(function ($item) {
 }, $editItems)) ?>;
 let items = [];
 let itemIndex = 0;
+let currentGrandTotal = 0;
 
 const categorySelect = document.getElementById('categorySelect');
 const productSelect = document.getElementById('productSelect');
@@ -782,6 +915,7 @@ function updateTotals() {
     const discount = (subtotal * normalizedDiscountPercent) / 100;
     const tax = ((subtotal - discount) * taxRate) / 100;
     const grandTotal = subtotal - discount + tax;
+    currentGrandTotal = grandTotal;
     const paid = parseFloat(document.getElementById('paidAmount').value) || 0;
     const balance = paid - grandTotal;
     
@@ -797,6 +931,10 @@ function updateTotals() {
 
 document.getElementById('discountPercent').addEventListener('input', updateTotals);
 document.getElementById('paidAmount').addEventListener('input', updateTotals);
+document.getElementById('payFullBtn').addEventListener('click', function () {
+    document.getElementById('paidAmount').value = currentGrandTotal.toFixed(2);
+    updateTotals();
+});
 
 if (isEditMode && Array.isArray(editItemsData) && editItemsData.length > 0) {
     document.getElementById('noItemsRow').style.display = 'none';
@@ -910,6 +1048,8 @@ $items->execute([$id]);
 $items = $items->fetchAll();
 
 $billDiscountPercent = floatval($bill['subtotal']) > 0 ? (floatval($bill['discount_amount']) / floatval($bill['subtotal'])) * 100 : 0;
+$brandLogoPath = 'WhatsApp Image 2026-03-30 at 21.39.04.jpeg';
+$brandLogoSrc = str_replace(' ', '%20', $brandLogoPath);
 ?>
 <!DOCTYPE html>
 <html>
@@ -919,8 +1059,15 @@ $billDiscountPercent = floatval($bill['subtotal']) > 0 ? (floatval($bill['discou
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: Arial, sans-serif; font-size: 12px; padding: 20px; }
         .invoice { max-width: 800px; margin: 0 auto; }
-        .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 20px; }
-        .company-name { font-size: 24px; font-weight: bold; }
+        .header { border-bottom: 2px solid #333; padding-bottom: 12px; margin-bottom: 20px; }
+        .letterhead { display: grid; grid-template-columns: 130px 1fr 130px; column-gap: 16px; align-items: center; }
+        .logo-wrap img { width: 130px; height: 130px; object-fit: cover; border-radius: 50%; border: 1px solid #444; }
+        .logo-spacer { width: 130px; height: 130px; visibility: hidden; }
+        .brand-block { flex: 1; text-align: center; }
+        .brand-title { font-size: 40px; font-weight: 800; letter-spacing: 1px; line-height: 1.05; }
+        .brand-line { font-size: 16px; line-height: 1.3; margin-top: 3px; }
+        .reg-line { margin-top: 8px; font-weight: 600; text-align: center; }
+        .invoice-tag { margin-top: 10px; display: inline-block; background: #333; color: #fff; padding: 4px 14px; font-weight: bold; }
         table { width: 100%; border-collapse: collapse; margin: 20px 0; }
         th { background: #333; color: white; padding: 10px; text-align: left; }
         td { padding: 10px; border-bottom: 1px solid #ddd; }
@@ -934,8 +1081,17 @@ $billDiscountPercent = floatval($bill['subtotal']) > 0 ? (floatval($bill['discou
 <body>
     <div class="invoice">
         <div class="header">
-            <div class="company-name"><?= htmlspecialchars($settings['company_name'] ?? 'Sri Ram Fire Works') ?></div>
-            <div><?= htmlspecialchars($settings['company_address'] ?? '') ?></div>
+            <div class="letterhead">
+                <div class="logo-wrap"><img src="<?= htmlspecialchars($brandLogoSrc) ?>" alt="Sriram Fireworks Logo"></div>
+                <div class="brand-block">
+                    <div class="brand-title">SRIRAM FIREWORKS</div>
+                    <div class="brand-line">No. 319, Galmankada, Kimbulapitiya.</div>
+                    <div class="brand-line">Prop : K.S.S.K. Fernando. Tel : 077 877 92 71</div>
+                    <div class="brand-line reg-line">Reg : No WAA/4327</div>
+                </div>
+                <div class="logo-spacer" aria-hidden="true"></div>
+            </div>
+            <div style="text-align:center"><span class="invoice-tag">RETAIL INVOICE</span></div>
         </div>
         
         <div style="display:flex; justify-content:space-between; margin-bottom:20px">
@@ -954,8 +1110,9 @@ $billDiscountPercent = floatval($bill['subtotal']) > 0 ? (floatval($bill['discou
 
         <div class="totals">
             <div class="totals-row"><span>Subtotal:</span><span><?= $currency ?> <?= number_format($bill['subtotal'], 2) ?></span></div>
+            <?php if (floatval($bill['discount_amount']) > 0): ?>
             <div class="totals-row"><span>Discount (<?= number_format($billDiscountPercent, 2) ?>%):</span><span>- <?= $currency ?> <?= number_format($bill['discount_amount'], 2) ?></span></div>
-            <div class="totals-row"><span>Tax:</span><span><?= $currency ?> <?= number_format($bill['tax_amount'], 2) ?></span></div>
+            <?php endif; ?>
             <div class="totals-row grand-total"><span>Grand Total:</span><span><?= $currency ?> <?= number_format($bill['total_amount'], 2) ?></span></div>
             <div class="totals-row"><span>Paid:</span><span><?= $currency ?> <?= number_format($bill['paid_amount'], 2) ?></span></div>
             <div class="totals-row"><span>Balance:</span><span><?= $currency ?> <?= number_format($bill['paid_amount'] - $bill['total_amount'], 2) ?></span></div>
