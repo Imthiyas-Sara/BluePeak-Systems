@@ -531,7 +531,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!empty($items)) {
             $subtotal = 0;
             foreach ($items as $item) {
-                $subtotal += ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
+                $quantity = floatval($item['quantity'] ?? 0);
+                $price = floatval($item['price'] ?? 0);
+                $itemDiscount = floatval($item['discount'] ?? 0);
+                $itemDiscount = min(max($itemDiscount, 0), $price);
+                $subtotal += $quantity * max($price - $itemDiscount, 0);
             }
             $discountPercent = max(0, min($discountPercent, 100));
             $discount = ($subtotal * $discountPercent) / 100;
@@ -580,8 +584,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $itemStmt = $pdo->prepare("INSERT INTO bill_items (bill_id, product_id, quantity, unit_price, discount, total) VALUES (?, ?, ?, ?, ?, ?)");
 
                 foreach ($items as $item) {
-                    $itemTotal = ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
-                    $itemStmt->execute([$billId, $item['product_id'], $item['quantity'], $item['price'], $item['discount'] ?? 0, $itemTotal]);
+                    $quantity = floatval($item['quantity'] ?? 0);
+                    $price = floatval($item['price'] ?? 0);
+                    $itemDiscount = floatval($item['discount'] ?? 0);
+                    $itemDiscount = min(max($itemDiscount, 0), $price);
+                    $itemTotal = $quantity * max($price - $itemDiscount, 0);
+                    $itemStmt->execute([$billId, intval($item['product_id'] ?? 0), $quantity, $price, $itemDiscount, $itemTotal]);
                 }
 
                 $pdo->commit();
@@ -628,7 +636,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($existingBill) {
                 $subtotal = 0;
                 foreach ($items as $item) {
-                    $subtotal += ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
+                    $quantity = floatval($item['quantity'] ?? 0);
+                    $price = floatval($item['price'] ?? 0);
+                    $itemDiscount = floatval($item['discount'] ?? 0);
+                    $itemDiscount = min(max($itemDiscount, 0), $price);
+                    $subtotal += $quantity * max($price - $itemDiscount, 0);
                 }
                 $discountPercent = max(0, min($discountPercent, 100));
                 $discount = ($subtotal * $discountPercent) / 100;
@@ -670,8 +682,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $itemStmt = $pdo->prepare("INSERT INTO bill_items (bill_id, product_id, quantity, unit_price, discount, total) VALUES (?, ?, ?, ?, ?, ?)");
 
                     foreach ($items as $item) {
-                        $itemTotal = ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
-                        $itemStmt->execute([$id, $item['product_id'], $item['quantity'], $item['price'], $item['discount'] ?? 0, $itemTotal]);
+                        $quantity = floatval($item['quantity'] ?? 0);
+                        $price = floatval($item['price'] ?? 0);
+                        $itemDiscount = floatval($item['discount'] ?? 0);
+                        $itemDiscount = min(max($itemDiscount, 0), $price);
+                        $itemTotal = $quantity * max($price - $itemDiscount, 0);
+                        $itemStmt->execute([$id, intval($item['product_id'] ?? 0), $quantity, $price, $itemDiscount, $itemTotal]);
                     }
 
                     $updateStmt = $pdo->prepare("UPDATE bills SET customer_id = NULL, subtotal = ?, discount_amount = ?, tax_amount = ?, total_amount = ?, paid_amount = ?, payment_status = ?, payment_method = ?, notes = ? WHERE id = ? AND type = 'wholesale'");
@@ -1155,7 +1171,7 @@ function addItem(product) {
 
     const row = document.createElement('tr');
     row.dataset.index = itemIndex;
-    row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${product.name}</strong><br><small class="text-muted">${product.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${product.id}"></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="1" min="1" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${product.price.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="0" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${product.price.toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
+    row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${product.name}</strong><br><small class="text-muted">${product.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${product.id}"></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="1" min="1" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${product.price.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${product.price.toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
     document.getElementById('itemsBody').appendChild(row);
     itemIndex++;
     updateTotals();
@@ -1177,7 +1193,7 @@ if (Array.isArray(initialItems) && initialItems.length > 0) {
 
         const row = document.createElement('tr');
         row.dataset.index = itemIndex;
-        row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${item.name}</strong><br><small class="text-muted">${item.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${item.product_id}"></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="${item.quantity}" min="1" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${item.price.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="${item.discount.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${((item.quantity * item.price) - item.discount).toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
+        row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${item.name}</strong><br><small class="text-muted">${item.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${item.product_id}"></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="${item.quantity}" min="1" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${item.price.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="${item.discount > 0 ? item.discount : ''}" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${(item.quantity * Math.max(item.price - item.discount, 0)).toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
         document.getElementById('itemsBody').appendChild(row);
         itemIndex++;
     });
@@ -1203,8 +1219,12 @@ function updateRowTotal(index) {
     const row = document.querySelector(`tr[data-index="${index}"]`);
     const qty = parseInt(row.querySelector('.qty-input').value, 10) || 0;
     const price = parseFloat(row.querySelector('.price-input').value) || 0;
-    const discount = parseFloat(row.querySelector('.discount-input').value) || 0;
-    row.querySelector('.row-total').textContent = `${currency} ${((qty * price) - discount).toFixed(2)}`;
+    const discountInput = row.querySelector('.discount-input');
+    let discount = parseFloat(discountInput.value) || 0;
+    discount = Math.min(Math.max(discount, 0), price);
+    discountInput.value = discount > 0 ? String(discount) : '';
+    const lineTotal = qty * Math.max(price - discount, 0);
+    row.querySelector('.row-total').textContent = `${currency} ${lineTotal.toFixed(2)}`;
     const idx = items.findIndex(i => i.index === index);
     if (idx >= 0) {
         items[idx].quantity = qty;
@@ -1216,7 +1236,10 @@ function updateRowTotal(index) {
 
 function updateTotals() {
     let subtotal = 0;
-    items.forEach(item => { subtotal += (item.quantity * item.price) - item.discount; });
+    items.forEach(item => {
+        const unitDiscount = Math.min(Math.max(item.discount || 0, 0), item.price || 0);
+        subtotal += item.quantity * Math.max((item.price || 0) - unitDiscount, 0);
+    });
     const discountPercent = Math.min(100, Math.max(0, parseFloat(document.getElementById('discountPercent').value) || 0));
     const discount = (subtotal * discountPercent) / 100;
     const tax = ((subtotal - discount) * taxRate) / 100;
@@ -1245,7 +1268,10 @@ document.getElementById('discountPercent').addEventListener('input', updateTotal
 document.getElementById('paidAmount').addEventListener('input', updateTotals);
 document.getElementById('payFullBtn').addEventListener('click', function() {
     let subtotal = 0;
-    items.forEach(item => { subtotal += (item.quantity * item.price) - item.discount; });
+    items.forEach(item => {
+        const unitDiscount = Math.min(Math.max(item.discount || 0, 0), item.price || 0);
+        subtotal += item.quantity * Math.max((item.price || 0) - unitDiscount, 0);
+    });
     const discountPercent = Math.min(100, Math.max(0, parseFloat(document.getElementById('discountPercent').value) || 0));
     const discount = (subtotal * discountPercent) / 100;
     const tax = ((subtotal - discount) * taxRate) / 100;

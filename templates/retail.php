@@ -298,7 +298,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!empty($items)) {
             $subtotal = 0;
             foreach ($items as $item) {
-                $subtotal += ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
+                $quantity = floatval($item['quantity'] ?? 0);
+                $price = floatval($item['price'] ?? 0);
+                $itemDiscount = floatval($item['discount'] ?? 0);
+                $itemDiscount = min(max($itemDiscount, 0), $price);
+                $subtotal += $quantity * max($price - $itemDiscount, 0);
             }
             $discountPercent = max(0, min($discountPercent, 100));
             $discount = ($subtotal * $discountPercent) / 100;
@@ -326,9 +330,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stockStmt = $pdo->prepare("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?");
                 
                 foreach ($items as $item) {
-                    $itemTotal = ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
-                    $itemStmt->execute([$billId, $item['product_id'], $item['quantity'], $item['price'], $item['discount'] ?? 0, $itemTotal]);
-                    $stockStmt->execute([$item['quantity'], $item['product_id']]);
+                    $quantity = floatval($item['quantity'] ?? 0);
+                    $price = floatval($item['price'] ?? 0);
+                    $itemDiscount = floatval($item['discount'] ?? 0);
+                    $itemDiscount = min(max($itemDiscount, 0), $price);
+                    $itemTotal = $quantity * max($price - $itemDiscount, 0);
+                    $itemStmt->execute([$billId, intval($item['product_id'] ?? 0), $quantity, $price, $itemDiscount, $itemTotal]);
+                    $stockStmt->execute([$quantity, intval($item['product_id'] ?? 0)]);
                 }
                 
                 $pdo->commit();
@@ -355,7 +363,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($existingBill) {
                 $subtotal = 0;
                 foreach ($items as $item) {
-                    $subtotal += ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
+                    $quantity = floatval($item['quantity'] ?? 0);
+                    $price = floatval($item['price'] ?? 0);
+                    $itemDiscount = floatval($item['discount'] ?? 0);
+                    $itemDiscount = min(max($itemDiscount, 0), $price);
+                    $subtotal += $quantity * max($price - $itemDiscount, 0);
                 }
 
                 $discountPercent = max(0, min($discountPercent, 100));
@@ -377,8 +389,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $itemStmt = $pdo->prepare("INSERT INTO bill_items (bill_id, product_id, quantity, unit_price, discount, total) VALUES (?, ?, ?, ?, ?, ?)");
                     foreach ($items as $item) {
-                        $itemTotal = ($item['quantity'] * $item['price']) - ($item['discount'] ?? 0);
-                        $itemStmt->execute([$id, $item['product_id'], $item['quantity'], $item['price'], $item['discount'] ?? 0, $itemTotal]);
+                        $quantity = floatval($item['quantity'] ?? 0);
+                        $price = floatval($item['price'] ?? 0);
+                        $itemDiscount = floatval($item['discount'] ?? 0);
+                        $itemDiscount = min(max($itemDiscount, 0), $price);
+                        $itemTotal = $quantity * max($price - $itemDiscount, 0);
+                        $itemStmt->execute([$id, intval($item['product_id'] ?? 0), $quantity, $price, $itemDiscount, $itemTotal]);
                     }
 
                     $updateStmt = $pdo->prepare("UPDATE bills SET customer_id = ?, subtotal = ?, discount_amount = ?, tax_amount = ?, total_amount = ?, paid_amount = ?, payment_status = ?, payment_method = ? WHERE id = ? AND type = 'retail'");
@@ -874,7 +890,7 @@ function addItem(product) {
 
     const row = document.createElement('tr');
     row.dataset.index = itemIndex;
-    row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${product.name}</strong><br><small class="text-muted">${product.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${product.id}"></td><td><span class="badge bg-secondary">${product.stock}</span></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="${initialQty}" min="1" max="${product.stock}" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${parseFloat(product.price).toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="${initialDiscount.toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${((initialQty * parseFloat(product.price)) - initialDiscount).toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
+    row.innerHTML = `<td>${itemIndex + 1}</td><td><strong>${product.name}</strong><br><small class="text-muted">${product.sku}</small><input type="hidden" name="items[${itemIndex}][product_id]" value="${product.id}"></td><td><span class="badge bg-secondary">${product.stock}</span></td><td><input type="number" name="items[${itemIndex}][quantity]" class="form-control form-control-sm qty-input" value="${initialQty}" min="1" max="${product.stock}" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][price]" class="form-control form-control-sm price-input" value="${parseFloat(product.price).toFixed(2)}" min="0" step="0.01" data-index="${itemIndex}"></td><td><input type="number" name="items[${itemIndex}][discount]" class="form-control form-control-sm discount-input" value="${initialDiscount > 0 ? initialDiscount : ''}" min="0" step="0.01" data-index="${itemIndex}"></td><td class="row-total">${currency} ${(initialQty * Math.max(parseFloat(product.price) - initialDiscount, 0)).toFixed(2)}</td><td><button type="button" class="btn btn-sm btn-danger remove-item" data-index="${itemIndex}"><i class="bi bi-trash"></i></button></td>`;
     document.getElementById('itemsBody').appendChild(row);
     itemIndex++;
     updateTotals();
@@ -900,8 +916,12 @@ function updateRowTotal(index) {
     const row = document.querySelector(`tr[data-index="${index}"]`);
     const qty = parseInt(row.querySelector('.qty-input').value) || 0;
     const price = parseFloat(row.querySelector('.price-input').value) || 0;
-    const discount = parseFloat(row.querySelector('.discount-input').value) || 0;
-    row.querySelector('.row-total').textContent = `${currency} ${((qty * price) - discount).toFixed(2)}`;
+    const discountInput = row.querySelector('.discount-input');
+    let discount = parseFloat(discountInput.value) || 0;
+    discount = Math.min(Math.max(discount, 0), price);
+    discountInput.value = discount > 0 ? String(discount) : '';
+    const lineTotal = qty * Math.max(price - discount, 0);
+    row.querySelector('.row-total').textContent = `${currency} ${lineTotal.toFixed(2)}`;
     const idx = items.findIndex(i => i.index === index);
     if (idx >= 0) { items[idx].quantity = qty; items[idx].price = price; items[idx].discount = discount; }
     updateTotals();
@@ -909,7 +929,10 @@ function updateRowTotal(index) {
 
 function updateTotals() {
     let subtotal = 0;
-    items.forEach(item => { subtotal += (item.quantity * item.price) - item.discount; });
+    items.forEach(item => {
+        const unitDiscount = Math.min(Math.max(item.discount || 0, 0), item.price || 0);
+        subtotal += item.quantity * Math.max((item.price || 0) - unitDiscount, 0);
+    });
     const discountPercent = parseFloat(document.getElementById('discountPercent').value) || 0;
     const normalizedDiscountPercent = Math.max(0, Math.min(100, discountPercent));
     const discount = (subtotal * normalizedDiscountPercent) / 100;
