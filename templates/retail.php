@@ -421,6 +421,61 @@ $period = $_GET['period'] ?? '';
 if (!in_array($period, ['today', 'month'], true)) {
     $period = '';
 }
+
+$topSalesCondition = "b.type = 'retail'";
+if ($period === 'today') {
+    $topSalesCondition .= " AND DATE(b.created_at) = CURRENT_DATE()";
+} elseif ($period === 'month') {
+    $topSalesCondition .= " AND MONTH(b.created_at) = MONTH(CURRENT_DATE()) AND YEAR(b.created_at) = YEAR(CURRENT_DATE())";
+}
+
+$topSellingByQtyStmt = $pdo->prepare(
+    "SELECT 
+        bi.product_id,
+        COALESCE(p.name, 'Unknown Product') AS product_name,
+        COALESCE(p.sku, '-') AS product_sku,
+        SUM(bi.quantity) AS total_qty,
+        SUM(bi.total) AS total_revenue,
+        COUNT(DISTINCT bi.bill_id) AS bill_count
+    FROM bill_items bi
+    INNER JOIN bills b ON b.id = bi.bill_id
+    LEFT JOIN products p ON p.id = bi.product_id
+    WHERE {$topSalesCondition}
+    GROUP BY bi.product_id, p.name, p.sku
+    ORDER BY total_qty DESC, total_revenue DESC
+    LIMIT 5"
+);
+$topSellingByQtyStmt->execute();
+$topSellingByQty = $topSellingByQtyStmt->fetchAll();
+
+$topSellingByRevenueStmt = $pdo->prepare(
+    "SELECT 
+        bi.product_id,
+        COALESCE(p.name, 'Unknown Product') AS product_name,
+        COALESCE(p.sku, '-') AS product_sku,
+        SUM(bi.quantity) AS total_qty,
+        SUM(bi.total) AS total_revenue,
+        COUNT(DISTINCT bi.bill_id) AS bill_count
+    FROM bill_items bi
+    INNER JOIN bills b ON b.id = bi.bill_id
+    LEFT JOIN products p ON p.id = bi.product_id
+    WHERE {$topSalesCondition}
+    GROUP BY bi.product_id, p.name, p.sku
+    ORDER BY total_revenue DESC, total_qty DESC
+    LIMIT 5"
+);
+$topSellingByRevenueStmt->execute();
+$topSellingByRevenue = $topSellingByRevenueStmt->fetchAll();
+
+$maxTopQty = 0;
+foreach ($topSellingByQty as $item) {
+    $maxTopQty = max($maxTopQty, floatval($item['total_qty'] ?? 0));
+}
+
+$maxTopRevenue = 0;
+foreach ($topSellingByRevenue as $item) {
+    $maxTopRevenue = max($maxTopRevenue, floatval($item['total_revenue'] ?? 0));
+}
 ?>
 <?php if (isset($_GET['cleared'])): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
@@ -478,6 +533,36 @@ if (!in_array($period, ['today', 'month'], true)) {
         .bill-toolbar-right > a {
             width: 100%;
         }
+    }
+
+    .insight-item-title {
+        font-weight: 600;
+        font-size: 0.95rem;
+    }
+
+    .chart-track {
+        position: relative;
+        width: 100%;
+        height: 10px;
+        border-radius: 999px;
+        background: #e9edf5;
+        overflow: hidden;
+    }
+
+    .chart-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        border-radius: 999px;
+    }
+
+    .chart-fill.qty {
+        background: linear-gradient(90deg, #f97316, #ef4444);
+    }
+
+    .chart-fill.revenue {
+        background: linear-gradient(90deg, #22c55e, #0ea5e9);
     }
 </style>
 
@@ -594,6 +679,68 @@ if (!in_array($period, ['today', 'month'], true)) {
     </div>
 </div>
 
+<div class="card mt-3 mb-3" id="topSellingSummaryCard">
+    <div class="card-header bg-light d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-stars me-2 text-primary"></i>Top Selling Items Summary</span>
+        <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#topSellingInsights" aria-expanded="false" aria-controls="topSellingInsights">
+            <i class="bi bi-chevron-down me-1"></i>Show Charts
+        </button>
+    </div>
+    <div class="collapse" id="topSellingInsights">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-lg-6">
+                    <h6 class="mb-3"><i class="bi bi-fire me-2 text-danger"></i>Top 5 by Quantity</h6>
+                    <?php if (!empty($topSellingByQty)): ?>
+                        <?php foreach ($topSellingByQty as $index => $item): ?>
+                            <?php $qtyPercent = $maxTopQty > 0 ? min(100, (floatval($item['total_qty']) / $maxTopQty) * 100) : 0; ?>
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between align-items-start gap-2 mb-1">
+                                    <div>
+                                        <div class="insight-item-title">#<?= $index + 1 ?> <?= htmlspecialchars($item['product_name']) ?></div>
+                                        <small class="text-muted"><?= htmlspecialchars($item['product_sku']) ?></small>
+                                    </div>
+                                    <div class="text-end">
+                                        <div class="fw-semibold"><?= number_format($item['total_qty']) ?> qty</div>
+                                        <small class="text-muted"><?= $currency ?> <?= number_format($item['total_revenue'], 2) ?></small>
+                                    </div>
+                                </div>
+                                <div class="chart-track"><div class="chart-fill qty" style="width: <?= number_format($qtyPercent, 2, '.', '') ?>%;"></div></div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <div class="text-muted">No retail sales data available.</div>
+                    <?php endif; ?>
+                </div>
+
+                <div class="col-lg-6">
+                    <h6 class="mb-3"><i class="bi bi-cash-coin me-2 text-success"></i>Top 5 by Revenue</h6>
+                    <?php if (!empty($topSellingByRevenue)): ?>
+                        <?php foreach ($topSellingByRevenue as $index => $item): ?>
+                            <?php $revenuePercent = $maxTopRevenue > 0 ? min(100, (floatval($item['total_revenue']) / $maxTopRevenue) * 100) : 0; ?>
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between align-items-start gap-2 mb-1">
+                                    <div>
+                                        <div class="insight-item-title">#<?= $index + 1 ?> <?= htmlspecialchars($item['product_name']) ?></div>
+                                        <small class="text-muted"><?= htmlspecialchars($item['product_sku']) ?></small>
+                                    </div>
+                                    <div class="text-end">
+                                        <div class="fw-semibold"><?= $currency ?> <?= number_format($item['total_revenue'], 2) ?></div>
+                                        <small class="text-muted"><?= number_format($item['total_qty']) ?> qty</small>
+                                    </div>
+                                </div>
+                                <div class="chart-track"><div class="chart-fill revenue" style="width: <?= number_format($revenuePercent, 2, '.', '') ?>%;"></div></div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <div class="text-muted">No retail sales data available.</div>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="d-flex justify-content-end mt-3">
     <form method="POST" action="?page=retail&action=clear_before" class="d-flex gap-2 align-items-center" data-confirm-message="CAUTION: This will permanently delete retail bills before the selected date. This action cannot be undone. Continue?" data-confirm-title="Confirm Retail Bill Deletion">
         <div class="clear-date-form">
@@ -684,6 +831,25 @@ if (!in_array($period, ['today', 'month'], true)) {
     });
 
     setInputState();
+
+    if (window.location.hash === '#topSellingSummaryCard') {
+        const collapseElement = document.getElementById('topSellingInsights');
+        const toggleButton = document.querySelector('[data-bs-target="#topSellingInsights"]');
+
+        if (collapseElement) {
+            // Fallback first: force visible even if Bootstrap JS has not initialized yet.
+            collapseElement.classList.add('show');
+        }
+
+        if (toggleButton) {
+            toggleButton.setAttribute('aria-expanded', 'true');
+            toggleButton.innerHTML = '<i class="bi bi-chevron-up me-1"></i>Hide Charts';
+        }
+
+        if (collapseElement && window.bootstrap && window.bootstrap.Collapse) {
+            window.bootstrap.Collapse.getOrCreateInstance(collapseElement).show();
+        }
+    }
 })();
 </script>
 

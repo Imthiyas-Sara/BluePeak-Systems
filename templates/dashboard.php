@@ -98,9 +98,8 @@ include 'header.php';
 <div class="row">
     <div class="col-md-8">
         <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
+            <div class="card-header">
                 <span><i class="bi bi-receipt me-2"></i>Recent Bills</span>
-                <a href="?page=reports" class="btn btn-sm btn-outline-primary">View All</a>
             </div>
             <div class="card-body p-0">
                 <table class="table table-hover mb-0">
@@ -109,7 +108,12 @@ include 'header.php';
                     </thead>
                     <tbody>
                         <?php foreach ($recentBills as $bill): ?>
-                        <tr>
+                        <?php
+                            $billType = $bill['type'] ?? '';
+                            $billViewPage = $billType === 'retail' ? 'retail' : 'event';
+                            $billViewUrl = '?page=' . $billViewPage . '&action=view&id=' . intval($bill['id'] ?? 0);
+                        ?>
+                        <tr class="recent-bill-row" style="cursor:pointer" onclick="window.location.href='<?= htmlspecialchars($billViewUrl, ENT_QUOTES) ?>'">
                             <td><strong><?= htmlspecialchars($bill['bill_number']) ?></strong></td>
                             <td><?= htmlspecialchars($bill['customer_name'] ?? 'Walk-in') ?></td>
                             <td><span class="badge bg-<?= $bill['type'] == 'retail' ? 'primary' : 'success' ?>"><?= $bill['type'] == 'wholesale' ? 'Event' : 'Retail' ?></span></td>
@@ -122,6 +126,11 @@ include 'header.php';
                         <?php endif; ?>
                     </tbody>
                 </table>
+                <div class="p-3 border-top bg-light-subtle d-flex justify-content-end">
+                    <a href="?page=retail#topSellingSummaryCard" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-bar-chart-line me-2"></i>Top Selling Items Summary
+                    </a>
+                </div>
             </div>
         </div>
     </div>
