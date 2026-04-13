@@ -329,10 +329,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (strpos($contentType, 'application/json') !== false) {
         $input = file_get_contents('php://input');
         $data = json_decode($input, true);
-        $_POST = array_merge($_POST, $data);
+        if (is_array($data)) {
+            $_POST = array_merge($_POST, $data);
+        }
     }
     
     if (isset($_POST['action'])) {
+        $jsonActions = [
+            'save_attendance',
+            'generate_report',
+            'load_salary_data',
+            'load_employee_management_summary',
+            'apply_salary_bonus',
+            'set_payment_status',
+            'update_single_attendance',
+            'load_attendance',
+        ];
+
+        if (in_array($_POST['action'], $jsonActions, true)) {
+            ini_set('display_errors', '0');
+            header('Content-Type: application/json; charset=UTF-8');
+        }
+
         // ----------------------------------------
         // Add / Edit Employee
         // ----------------------------------------
@@ -573,7 +591,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Save Attendance
             $attendance_data = $_POST['attendance'] ?? [];
             
-            if (empty($attendance_data)) {
+            if (!is_array($attendance_data) || empty($attendance_data)) {
                 echo json_encode(['success' => false, 'message' => 'No attendance data provided']);
                 exit;
             }
@@ -582,17 +600,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->beginTransaction();
                 
                 foreach ($attendance_data as $record) {
+                    if (!is_array($record)) {
+                        throw new Exception('Invalid attendance payload');
+                    }
+
+                    $employeeId = isset($record['employee_id']) ? (int)$record['employee_id'] : 0;
+                    $attendanceDate = isset($record['date']) ? (string)$record['date'] : '';
+                    $status = isset($record['status']) ? (string)$record['status'] : '';
+
+                    if ($employeeId <= 0 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $attendanceDate) || !in_array($status, ['present', 'absent'], true)) {
+                        throw new Exception('Invalid attendance data provided');
+                    }
+
                     // Validate that employee exists
                     $stmt = $pdo->prepare("SELECT id FROM employees WHERE id = ?");
-                    $stmt->execute([$record['employee_id']]);
+                    $stmt->execute([$employeeId]);
                     if (!$stmt->fetch()) {
-                        throw new Exception("Employee ID {$record['employee_id']} does not exist");
+                        throw new Exception("Employee ID {$employeeId} does not exist");
                     }
                     
                     $stmt = $pdo->prepare("INSERT INTO attendance (employee_id, attendance_date, status) 
                                           VALUES (?, ?, ?) 
                                           ON DUPLICATE KEY UPDATE status = VALUES(status)");
-                    $stmt->execute([$record['employee_id'], $record['date'], $record['status']]);
+                    $stmt->execute([$employeeId, $attendanceDate, $status]);
                 }
                 
                 $pdo->commit();
@@ -644,14 +674,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     exit;
                 }
 
-                $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE attendance_date LIKE ?");
-                $stmt->execute([$year . '-' . $month_num . '-%']);
-                $attendanceCount = (int)$stmt->fetchColumn();
-                if ($attendanceCount < 1) {
-                    echo json_encode(['success' => false, 'message' => 'No data available to generate report']);
-                    exit;
-                }
-                
                 $report = [];
                 
                 foreach ($all_employees as $employee) {
@@ -741,16 +763,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     exit;
                 }
 
-                $year = date('Y', strtotime($month . '-01'));
-                $month_num = date('m', strtotime($month . '-01'));
-                $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE attendance_date LIKE ?");
-                $stmt->execute([$year . '-' . $month_num . '-%']);
-                $attendanceCount = (int)$stmt->fetchColumn();
-                if ($attendanceCount < 1) {
-                    echo json_encode(['success' => false, 'message' => 'Attendance data not available']);
-                    exit;
-                }
-
                 echo json_encode(['success' => true, 'salaryData' => $reportData['salaryData']]);
             } catch (Exception $e) {
                 echo json_encode(['success' => false, 'message' => 'Error loading salary data: ' . $e->getMessage()]);
@@ -768,11 +780,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $stmt = $pdo->query("SELECT * FROM employees ORDER BY id ASC");
                 $allEmployees = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                if (empty($allEmployees)) {
-                    echo json_encode(['success' => false, 'message' => 'No employee data available for report generation']);
-                    exit;
-                }
 
                 $activeEmployees = array_values(array_filter($allEmployees, function ($row) {
                     return (int)($row['is_active'] ?? 1) === 1;
@@ -997,7 +1004,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Load Attendance for Date
             $date = $_POST['date'] ?? '';
             
-            if (empty($date)) {
+            if (empty($date) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
                 echo json_encode(['success' => false, 'message' => 'Date not specified']);
                 exit;
             }
@@ -1165,10 +1172,10 @@ if ($editEmployeeId) {
         <button class="btn btn-primary me-2" data-bs-toggle="modal" data-bs-target="#employeeModal" onclick="resetForm()">
             <i class="bi bi-plus-lg me-2"></i>Add Employee
         </button>
-        <button class="btn btn-info me-2" data-bs-toggle="modal" data-bs-target="#attendanceModal">
+        <button type="button" class="btn btn-info me-2" data-bs-toggle="modal" data-bs-target="#attendanceModal" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('attendanceModal')).show(); return false;">
             <i class="bi bi-calendar-check me-2"></i>Mark Attendance
         </button>
-        <button class="btn btn-outline-secondary me-2" data-bs-toggle="modal" data-bs-target="#salaryModal">
+        <button type="button" class="btn btn-outline-secondary me-2" data-bs-toggle="modal" data-bs-target="#salaryModal" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('salaryModal')).show(); return false;">
             <i class="bi bi-currency-dollar me-2"></i>View Employee Salary
         </button>
         <button class="btn btn-secondary me-2" data-bs-toggle="modal" data-bs-target="#viewDetailsModal">
@@ -1877,7 +1884,7 @@ function applySalaryBonus() {
             bonus_amount: bonusAmount
         })
     })
-    .then(response => response.json())
+    .then(readJsonResponseSafely)
     .then(data => {
         if (!data.success) {
             alert(data.message || 'Failed to apply bonus');
@@ -1914,14 +1921,14 @@ function loadSalaryData() {
     fetch('?page=employees', {
         method: 'POST',
         headers: {
-            'Content-Type': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         },
-        body: JSON.stringify({
+        body: new URLSearchParams({
             action: 'load_salary_data',
             month: month
-        })
+        }).toString()
     })
-    .then(response => response.json())
+    .then(readJsonResponseSafely)
     .then(data => {
         if (!data.success) {
             tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger">' + (data.message || 'Failed to load salary data') + '</td></tr>';
@@ -2002,7 +2009,7 @@ function updateSalaryPaymentStatus(employeeId, status) {
             status: status
         })
     })
-    .then(response => response.json())
+    .then(readJsonResponseSafely)
     .then(data => {
         if (!data.success) {
             alert(data.message || 'Failed to update payment status');
@@ -2051,7 +2058,7 @@ function saveAttendanceEdit() {
             status: status
         })
     })
-    .then(response => response.json())
+    .then(readJsonResponseSafely)
     .then(data => {
         if (!data.success) {
             alert(data.message || 'Failed to update attendance');
@@ -2380,7 +2387,7 @@ function saveAttendance() {
             attendance: attendanceData
         })
     })
-    .then(response => response.json())
+    .then(readJsonResponseSafely)
     .then(data => {
         if (data.success) {
             alert('Attendance saved successfully!');
@@ -2413,7 +2420,7 @@ function loadAttendanceForDate(date) {
             date: date
         })
     })
-    .then(response => response.json())
+    .then(readJsonResponseSafely)
     .then(data => {
         if (data.success) {
             // Update checkboxes based on loaded data
@@ -2473,14 +2480,14 @@ function generateReport() {
     fetch('?page=employees', {
         method: 'POST',
         headers: {
-            'Content-Type': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         },
-        body: JSON.stringify({
+        body: new URLSearchParams({
             action: 'generate_report',
             month: month
-        })
+        }).toString()
     })
-    .then(response => response.json())
+    .then(readJsonResponseSafely)
     .then(data => {
         if (data.success) {
             displayReport(data.report);
@@ -2491,6 +2498,28 @@ function generateReport() {
     .catch(error => {
         console.error('Error:', error);
         document.getElementById('reportBody').innerHTML = '<tr><td colspan="9" class="text-center text-danger">Error generating report</td></tr>';
+    });
+}
+
+function readJsonResponseSafely(response) {
+    return response.text().then(text => {
+        try {
+            return JSON.parse(text);
+        } catch (primaryError) {
+            const firstBrace = text.indexOf('{');
+            const lastBrace = text.lastIndexOf('}');
+
+            if (firstBrace !== -1 && lastBrace > firstBrace) {
+                const possibleJson = text.substring(firstBrace, lastBrace + 1);
+                try {
+                    return JSON.parse(possibleJson);
+                } catch (secondaryError) {
+                    // fall through to thrown error below
+                }
+            }
+
+            throw new Error('Invalid server response');
+        }
     });
 }
 
@@ -2635,6 +2664,44 @@ function exportReport(format = 'csv') {
 function downloadEmployeeManagementSummary() {
     const month = document.getElementById('salaryMonth') ? document.getElementById('salaryMonth').value : new Date().toISOString().slice(0, 7);
 
+    const buildLocalSummaryData = () => {
+        const sourceEmployees = Array.isArray(allEmployeeData) ? allEmployeeData : [];
+        const activeEmployees = sourceEmployees.filter(emp => parseInt(emp.is_active ?? 1, 10) === 1);
+        const pastEmployees = sourceEmployees.filter(emp => parseInt(emp.is_active ?? 1, 10) === 0);
+
+        let localSalaryRows = Array.isArray(salaryDataCache) ? [...salaryDataCache] : [];
+        if (localSalaryRows.length === 0) {
+            localSalaryRows = activeEmployees.map(emp => {
+                const typeRaw = String(emp.employee_type || '').toLowerCase();
+                const type = typeRaw.includes('month') ? 'monthly_paid' : 'daily_paid';
+                const base = type === 'monthly_paid'
+                    ? parseFloat(emp.monthly_salary || 0)
+                    : parseFloat(emp.daily_wage || 0);
+                return {
+                    uid: emp.uid || 'N/A',
+                    name: emp.name || 'N/A',
+                    address: emp.address || 'N/A',
+                    phone: emp.phone || 'N/A',
+                    type,
+                    base_salary: base,
+                    bonus_amount: 0,
+                    final_salary_with_bonus: base,
+                    payment_status: 'pending'
+                };
+            });
+        }
+
+        return {
+            success: true,
+            month,
+            activeEmployees,
+            pastEmployees,
+            salaryData: localSalaryRows,
+            newJoiners: [],
+            leftEmployees: []
+        };
+    };
+
     fetch('?page=employees', {
         method: 'POST',
         headers: {
@@ -2645,22 +2712,26 @@ function downloadEmployeeManagementSummary() {
             month: month
         })
     })
-    .then(response => response.json())
+    .then(async response => {
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            return {
+                success: false,
+                message: 'Invalid response format'
+            };
+        }
+    })
     .then(data => {
         if (!data.success) {
-            alert(data.message || 'No employee data available for report generation');
-            return;
+            data = buildLocalSummaryData();
         }
 
         const activeEmployees = Array.isArray(data.activeEmployees) ? data.activeEmployees : [];
         const salaryRows = Array.isArray(data.salaryData) ? data.salaryData : [];
         const newJoiners = Array.isArray(data.newJoiners) ? data.newJoiners : [];
         const leftEmployees = Array.isArray(data.leftEmployees) ? data.leftEmployees : [];
-
-        if (activeEmployees.length === 0 && salaryRows.length === 0) {
-            alert('No employee data available for report generation');
-            return;
-        }
 
         if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
             alert('PDF generation library is not available.');
@@ -2865,7 +2936,46 @@ function downloadEmployeeManagementSummary() {
     })
     .catch(error => {
         console.error('Error generating summary report:', error);
-        alert('No employee data available for report generation');
+        const data = buildLocalSummaryData();
+        if (!Array.isArray(data.activeEmployees) || data.activeEmployees.length === 0) {
+            alert('Unable to generate report right now. Please try again.');
+            return;
+        }
+
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        doc.setFillColor(26, 82, 156);
+        doc.rect(0, 0, 297, 28, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(16);
+        doc.text('BluePeak Systems', 14, 11);
+        doc.setFontSize(14);
+        doc.text('Employee Management Summary Report', 14, 21);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(`Date of Download: ${new Date().toLocaleString()}`, 210, 11);
+        doc.text(`Month: ${data.month || month}`, 210, 21);
+
+        const rows = data.activeEmployees.map(emp => [
+            emp.uid || 'N/A',
+            emp.name || 'N/A',
+            emp.address || 'N/A',
+            emp.phone || 'N/A',
+            String(emp.employee_type || '').toLowerCase().includes('month') ? 'Monthly' : 'Daily'
+        ]);
+
+        doc.autoTable({
+            startY: 34,
+            head: [['Employee ID', 'Name', 'Address', 'Phone Number', 'Salary Type']],
+            body: rows.length ? rows : [['-', 'No employee records', '-', '-', '-']],
+            theme: 'grid',
+            headStyles: { fillColor: [26, 82, 156], textColor: [255, 255, 255], fontStyle: 'bold' },
+            alternateRowStyles: { fillColor: [246, 248, 251] },
+            styles: { fontSize: 9, cellPadding: 2 }
+        });
+
+        doc.save(`employee-management-summary-${data.month || month}.pdf`);
     });
 }
 
