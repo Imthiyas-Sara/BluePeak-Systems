@@ -1,0 +1,17 @@
+{
+  "sqltools.connections": [
+    {
+      "name": "Sri Ram Fireworks Local",
+      "driver": "MySQL",
+      "server": "127.0.0.1",
+      "port": 3306,
+      "database": "sri_ram_fireworks",
+      "username": "root",
+      "password": "",
+      "mysqlOptions": {
+        "authProtocol": "default"
+      },
+      "previewLimit": 50
+    }
+  ]
+}
