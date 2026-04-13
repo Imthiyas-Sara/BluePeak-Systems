@@ -1,4 +1,7 @@
-<?php
+﻿ <?php
+// ========================================
+// Employee Management Module Bootstrap
+// ========================================
 // Handle form submissions BEFORE any output
 $success = null;
 $error = null;
@@ -13,6 +16,9 @@ if (isset($_SESSION['flash_error'])) {
     unset($_SESSION['flash_error']);
 }
 
+// ========================================
+// Monthly Salary Calculation Helper
+// ========================================
 $buildMonthlySalaryData = function ($month, $includeInactive = false) use ($pdo) {
     $year = date('Y', strtotime($month . '-01'));
     $month_num = date('m', strtotime($month . '-01'));
@@ -31,11 +37,15 @@ $buildMonthlySalaryData = function ($month, $includeInactive = false) use ($pdo)
     $stmt->execute([$month]);
     $paymentStatuses = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
 
+    $stmt = $pdo->prepare("SELECT employee_id, bonus_amount FROM employee_salary_bonus WHERE month = ?");
+    $stmt->execute([$month]);
+    $bonusAmounts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
     $employeeQuery = "SELECT * FROM employees";
     if (!$includeInactive) {
         $employeeQuery .= " WHERE is_active = 1";
     }
-    $employeeQuery .= " ORDER BY name ASC";
+    $employeeQuery .= " ORDER BY id ASC";
 
     $stmt = $pdo->query($employeeQuery);
     $employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -78,10 +88,15 @@ $buildMonthlySalaryData = function ($month, $includeInactive = false) use ($pdo)
             $salary_type_label = 'Monthly Salary: LKR ' . number_format($monthly_salary, 2);
         }
 
+        $base_salary = $final_salary;
+        $bonus_amount = (float)($bonusAmounts[$employee['id']] ?? 0);
+        $final_salary_with_bonus = $base_salary + $bonus_amount;
+
         $salaryData[] = [
             'id' => $employee['id'],
             'uid' => $employee['uid'] ?? 'N/A',
             'name' => $employee['name'] ?? 'N/A',
+            'address' => $employee['address'] ?? 'N/A',
             'type' => $employee_type,
             'phone' => $employee['phone'] ?? 'N/A',
             'is_active' => (int)($employee['is_active'] ?? 1),
@@ -90,7 +105,10 @@ $buildMonthlySalaryData = function ($month, $includeInactive = false) use ($pdo)
             'present_days' => $present_days,
             'total_working_days' => $working_days,
             'salary_type_label' => $salary_type_label,
-            'final_salary' => number_format($final_salary, 2, '.', ''),
+            'base_salary' => number_format($base_salary, 2, '.', ''),
+            'bonus_amount' => number_format($bonus_amount, 2, '.', ''),
+            'final_salary' => number_format($base_salary, 2, '.', ''),
+            'final_salary_with_bonus' => number_format($final_salary_with_bonus, 2, '.', ''),
             'payment_status' => $paymentStatuses[$employee['id']] ?? 'pending'
         ];
     }
@@ -101,35 +119,52 @@ $buildMonthlySalaryData = function ($month, $includeInactive = false) use ($pdo)
     ];
 };
 
+// ========================================
+// Report Support Tables
+// ========================================
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS employee_salary_bonus (
+        employee_id INT NOT NULL,
+        month VARCHAR(7) NOT NULL,
+        bonus_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (employee_id, month)
+    )");
+} catch (Exception $e) {
+    // Keep existing workflow unchanged if initialization fails.
+}
+
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS employee_deletion_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        employee_id INT,
+        uid VARCHAR(50),
+        name VARCHAR(100),
+        address TEXT,
+        phone VARCHAR(20),
+        employee_type VARCHAR(30),
+        daily_wage DECIMAL(10,2) DEFAULT 0,
+        monthly_salary DECIMAL(10,2) DEFAULT 0,
+        deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        deleted_month VARCHAR(7)
+    )");
+} catch (Exception $e) {
+    // Keep existing workflow unchanged if initialization fails.
+}
+
+// ========================================
+// PDF Report Endpoint
+// ========================================
 $requestAction = $_GET['action'] ?? '';
 if ($requestAction === 'download_salary_report') {
     $month = $_GET['month'] ?? date('Y-m');
-    $format = strtolower($_GET['format'] ?? 'pdf');
     if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
         $month = date('Y-m');
     }
 
     $reportData = $buildMonthlySalaryData($month, true);
     $salaryData = $reportData['salaryData'];
-
-    if ($format === 'csv') {
-        $filename = 'employee-salary-report-' . $month . '.csv';
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename=' . $filename);
-        $out = fopen('php://output', 'w');
-        fputcsv($out, ['Employee UID', 'Employee Name', 'Employee Type', 'Calculated Salary', 'Payment Status']);
-        foreach ($salaryData as $row) {
-            fputcsv($out, [
-                $row['uid'],
-                $row['name'],
-                $row['type'] === 'daily_paid' ? 'Daily Paid' : 'Monthly Paid',
-                'LKR ' . number_format((float)$row['final_salary'], 2),
-                ucfirst($row['payment_status'])
-            ]);
-        }
-        fclose($out);
-        exit;
-    }
 
     $monthStart = $month . '-01';
     $monthEnd = date('Y-m-t', strtotime($monthStart));
@@ -157,7 +192,7 @@ if ($requestAction === 'download_salary_report') {
             }
         }
 
-        $salaryAmount = (float)($row['final_salary'] ?? 0);
+        $salaryAmount = (float)($row['final_salary_with_bonus'] ?? 0);
         if (($row['payment_status'] ?? 'pending') === 'paid') {
             $paidEmployees++;
             $totalSalaryPaid += $salaryAmount;
@@ -199,14 +234,15 @@ if ($requestAction === 'download_salary_report') {
 
     $lines[] = ['text' => ' ', 'size' => 8, 'font' => '/F1'];
     $lines[] = ['text' => 'SECTION B - ATTENDANCE & SALARY DETAILS', 'size' => 11, 'font' => '/F2'];
-    $lines[] = ['text' => 'UID        Present/Work   Salary Type                    Final Salary      Payment', 'size' => 9, 'font' => '/F2'];
+    $lines[] = ['text' => 'UID      Present/Work  Base Salary   Bonus      Final Salary   Payment', 'size' => 9, 'font' => '/F2'];
     foreach ($salaryData as $row) {
-        $uid = str_pad(substr((string)$row['uid'], 0, 10), 10);
+        $uid = str_pad(substr((string)$row['uid'], 0, 8), 8);
         $attendance = str_pad((string)$row['present_days'] . '/' . (string)$row['total_working_days'], 13);
-        $salaryType = str_pad(substr((string)$row['salary_type_label'], 0, 30), 30);
-        $finalSalary = str_pad('LKR ' . number_format((float)$row['final_salary'], 2), 15);
+        $baseSalary = str_pad('LKR ' . number_format((float)$row['base_salary'], 2), 12);
+        $bonusAmount = str_pad('LKR ' . number_format((float)$row['bonus_amount'], 2), 10);
+        $finalSalary = str_pad('LKR ' . number_format((float)$row['final_salary_with_bonus'], 2), 13);
         $payment = ucfirst((string)($row['payment_status'] ?? 'pending'));
-        $lines[] = ['text' => $uid . '  ' . $attendance . '  ' . $salaryType . '  ' . $finalSalary . '  ' . $payment, 'size' => 8, 'font' => '/F3'];
+        $lines[] = ['text' => $uid . '  ' . $attendance . '  ' . $baseSalary . '  ' . $bonusAmount . '  ' . $finalSalary . '  ' . $payment, 'size' => 8, 'font' => '/F3'];
     }
 
     $lines[] = ['text' => ' ', 'size' => 8, 'font' => '/F1'];
@@ -285,6 +321,9 @@ if ($requestAction === 'download_salary_report') {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // ========================================
+    // Employee Action Handlers
+    // ========================================
     // Handle JSON requests
     $contentType = isset($_SERVER["CONTENT_TYPE"]) ? trim($_SERVER["CONTENT_TYPE"]) : '';
     if (strpos($contentType, 'application/json') !== false) {
@@ -294,31 +333,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     
     if (isset($_POST['action'])) {
+        // ----------------------------------------
+        // Add / Edit Employee
+        // ----------------------------------------
         if ($_POST['action'] === 'add' || $_POST['action'] === 'edit') {
             // Add or Edit Employee
             $uid = $_POST['uid'] ?? '';
-            $name = $_POST['name'] ?? '';
-            $address = $_POST['address'] ?? '';
-            $employee_type = $_POST['employee_type'] ?? 'daily_paid';
-            $phone = $_POST['phone'] ?? '';
+            $name = trim((string)($_POST['name'] ?? ''));
+            $address = trim((string)($_POST['address'] ?? ''));
+            $employee_type = trim((string)($_POST['employee_type'] ?? ''));
+            $phone = trim((string)($_POST['phone'] ?? ''));
             $daily_wage = $_POST['daily_wage'] ?? 0;
             $monthly_salary = $_POST['monthly_salary'] ?? 0;
             
             // Normalize and validate type & wage values
-            $employee_type = strpos(strtolower($employee_type), 'month') !== false ? 'monthly_paid' : 'daily_paid';
+            $typeRaw = strtolower($employee_type);
+            if (strpos($typeRaw, 'month') !== false) {
+                $employee_type = 'monthly_paid';
+            } elseif (strpos($typeRaw, 'day') !== false) {
+                $employee_type = 'daily_paid';
+            }
             $daily_wage = is_numeric($daily_wage) ? floatval($daily_wage) : 0;
             $monthly_salary = is_numeric($monthly_salary) ? floatval($monthly_salary) : 0;
 
-            if (!$name || !$phone) {
-                $error = "Name and Phone are required fields!";
+            $missingRequired = (
+                $name === '' ||
+                $phone === '' ||
+                $address === '' ||
+                !in_array($employee_type, ['daily_paid', 'monthly_paid'], true) ||
+                ($employee_type === 'daily_paid' && $daily_wage <= 0) ||
+                ($employee_type === 'monthly_paid' && $monthly_salary <= 0)
+            );
+
+            if ($missingRequired) {
+                $error = "Please fill all required fields";
+            } elseif (!preg_match('/^[A-Za-z ]+$/', $name)) {
+                $error = "Name is required and must contain only letters and spaces.";
+            } elseif (!preg_match('/^\d{10}$/', $phone)) {
+                $error = "Phone Number is required and must be exactly 10 digits.";
             } elseif ($employee_type === 'daily_paid' && $daily_wage <= 0) {
                 $error = "Please provide a valid Daily Rate / Amount.";
             } elseif ($employee_type === 'monthly_paid' && $monthly_salary <= 0) {
                 $error = "Please provide a valid Monthly Salary.";
             } else {
                 if ($_POST['action'] === 'add') {
+                    // UID must be auto-generated and non-editable.
+                    $uid = '';
+
                     // Generate UID if not provided
                     if (!$uid) {
+                        $stmt = $pdo->query("SELECT MAX(CAST(SUBSTRING(uid, 5) AS UNSIGNED)) as max_id FROM employees");
+                        $maxId = $stmt->fetch(PDO::FETCH_ASSOC)['max_id'] ?? 0;
+                        $uid = 'EMP-' . str_pad($maxId + 1, 3, '0', STR_PAD_LEFT);
+                    }
+
+                    // Ensure UID is unique even when legacy data has collisions.
+                    while (true) {
+                        $uidCheck = $pdo->prepare("SELECT id FROM employees WHERE uid = ? LIMIT 1");
+                        $uidCheck->execute([$uid]);
+                        if (!$uidCheck->fetch()) {
+                            break;
+                        }
                         $stmt = $pdo->query("SELECT MAX(CAST(SUBSTRING(uid, 5) AS UNSIGNED)) as max_id FROM employees");
                         $maxId = $stmt->fetch(PDO::FETCH_ASSOC)['max_id'] ?? 0;
                         $uid = 'EMP-' . str_pad($maxId + 1, 3, '0', STR_PAD_LEFT);
@@ -330,15 +405,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     // Edit Employee
                     $employee_id = $_POST['employee_id'] ?? '';
-                    $stmt = $pdo->prepare("UPDATE employees SET name = ?, address = ?, employee_type = ?, phone = ?, daily_wage = ?, monthly_salary = ? WHERE id = ?");
-                    $stmt->execute([$name, $address, $employee_type, $phone, $daily_wage, $monthly_salary, $employee_id]);
-                    $_SESSION['flash_success'] = "Employee updated successfully!";
+                    if (!is_numeric($employee_id) || (int)$employee_id <= 0) {
+                        $error = "Employee not found";
+                    } else {
+                        $existsStmt = $pdo->prepare("SELECT id FROM employees WHERE id = ? LIMIT 1");
+                        $existsStmt->execute([$employee_id]);
+                        if (!$existsStmt->fetch()) {
+                            $error = "Employee not found";
+                        }
+                    }
+
+                    if (!$error) {
+                        $stmt = $pdo->prepare("UPDATE employees SET name = ?, address = ?, employee_type = ?, phone = ?, daily_wage = ?, monthly_salary = ? WHERE id = ?");
+                        $stmt->execute([$name, $address, $employee_type, $phone, $daily_wage, $monthly_salary, $employee_id]);
+                        $_SESSION['flash_success'] = "Employee updated successfully!";
+                    }
                 }
 
                 // Redirect to prevent duplicate submission on page refresh
-                header("Location: ?page=employees");
-                exit;
+                if (!$error) {
+                    header("Location: ?page=employees");
+                    exit;
+                }
             }
+        // ----------------------------------------
+        // Move to Past Employees
+        // ----------------------------------------
         } elseif ($_POST['action'] === 'delete') {
             // Soft Delete Employee - Mark as inactive instead of permanent deletion
             $employee_id = $_POST['employee_id'] ?? '';
@@ -348,15 +440,135 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['flash_success'] = "Employee moved to past employees list!";
             header("Location: ?page=employees");
             exit;
+        // ----------------------------------------
+        // Reactivate Past Employee
+        // ----------------------------------------
         } elseif ($_POST['action'] === 'reactivate') {
             // Reactivate Employee
             $employee_id = $_POST['employee_id'] ?? '';
-            $stmt = $pdo->prepare("UPDATE employees SET is_active = 1 WHERE id = ?");
+
+            if (!is_numeric($employee_id) || (int)$employee_id <= 0) {
+                $_SESSION['flash_error'] = "Employee not found";
+                header("Location: ?page=employees");
+                exit;
+            }
+
+            $stmt = $pdo->prepare("SELECT id, uid, is_active FROM employees WHERE id = ? LIMIT 1");
+            $stmt->execute([$employee_id]);
+            $employeeRow = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$employeeRow) {
+                $_SESSION['flash_error'] = "Employee not found";
+                header("Location: ?page=employees");
+                exit;
+            }
+
+            if ((int)$employeeRow['is_active'] === 1) {
+                $_SESSION['flash_error'] = "Employee already active";
+                header("Location: ?page=employees");
+                exit;
+            }
+
+            $uid = trim((string)($employeeRow['uid'] ?? ''));
+            if ($uid !== '') {
+                $dupStmt = $pdo->prepare("SELECT id FROM employees WHERE uid = ? AND is_active = 1 AND id <> ? LIMIT 1");
+                $dupStmt->execute([$uid, $employee_id]);
+                if ($dupStmt->fetch()) {
+                    $_SESSION['flash_error'] = "Employee already active";
+                    header("Location: ?page=employees");
+                    exit;
+                }
+            }
+
+            $stmt = $pdo->prepare("UPDATE employees SET is_active = 1 WHERE id = ? AND is_active = 0");
             $stmt->execute([$employee_id]);
             
             $_SESSION['flash_success'] = "Employee reactivated successfully!";
             header("Location: ?page=employees");
             exit;
+        // ----------------------------------------
+        // Permanent Employee Delete
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'permanent_delete') {
+            // Permanently delete only past/inactive employees
+            $employee_id = $_POST['employee_id'] ?? '';
+
+            if (!is_numeric($employee_id) || (int)$employee_id <= 0) {
+                $_SESSION['flash_error'] = "Invalid employee selected for permanent deletion.";
+                header("Location: ?page=employees");
+                exit;
+            }
+
+            try {
+                $pdo->beginTransaction();
+
+                $checkStmt = $pdo->prepare("SELECT id, uid, name, address, phone, employee_type, daily_wage, monthly_salary, is_active FROM employees WHERE id = ? LIMIT 1");
+                $checkStmt->execute([$employee_id]);
+                $row = $checkStmt->fetch(PDO::FETCH_ASSOC);
+                if (!$row) {
+                    $pdo->rollBack();
+                    $_SESSION['flash_error'] = "Employee already deleted";
+                    header("Location: ?page=employees");
+                    exit;
+                }
+
+                if ((int)$row['is_active'] === 1) {
+                    $pdo->rollBack();
+                    $_SESSION['flash_error'] = "Employee not found";
+                    header("Location: ?page=employees");
+                    exit;
+                }
+
+                $deletedMonth = date('Y-m');
+                $archiveStmt = $pdo->prepare("INSERT INTO employee_deletion_history
+                    (employee_id, uid, name, address, phone, employee_type, daily_wage, monthly_salary, deleted_month)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $archiveStmt->execute([
+                    $row['id'],
+                    $row['uid'] ?? null,
+                    $row['name'] ?? null,
+                    $row['address'] ?? null,
+                    $row['phone'] ?? null,
+                    $row['employee_type'] ?? null,
+                    (float)($row['daily_wage'] ?? 0),
+                    (float)($row['monthly_salary'] ?? 0),
+                    $deletedMonth
+                ]);
+
+                // Remove dependent records before deleting the employee row.
+                $stmt = $pdo->prepare("DELETE FROM attendance WHERE employee_id = ?");
+                $stmt->execute([$employee_id]);
+
+                $stmt = $pdo->prepare("DELETE FROM salary_payments WHERE employee_id = ?");
+                $stmt->execute([$employee_id]);
+
+                $stmt = $pdo->prepare("DELETE FROM employee_salary_bonus WHERE employee_id = ?");
+                $stmt->execute([$employee_id]);
+
+                $stmt = $pdo->prepare("DELETE FROM employees WHERE id = ? AND is_active = 0");
+                $stmt->execute([$employee_id]);
+
+                if ($stmt->rowCount() < 1) {
+                    $pdo->rollBack();
+                    $_SESSION['flash_error'] = "Employee already deleted";
+                    header("Location: ?page=employees");
+                    exit;
+                }
+
+                $pdo->commit();
+                $_SESSION['flash_success'] = "Employee permanently deleted.";
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $_SESSION['flash_error'] = "Error deleting employee permanently: " . $e->getMessage();
+            }
+
+            header("Location: ?page=employees");
+            exit;
+        // ----------------------------------------
+        // Attendance Persistence
+        // ----------------------------------------
         } elseif ($_POST['action'] === 'save_attendance') {
             // Save Attendance
             $attendance_data = $_POST['attendance'] ?? [];
@@ -390,6 +602,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => false, 'message' => 'Error saving attendance: ' . $e->getMessage()]);
             }
             exit;
+        // ----------------------------------------
+        // Manage Employees Report Data
+        // ----------------------------------------
         } elseif ($_POST['action'] === 'generate_report') {
             // Generate Monthly Report (existing report logic)
             $month = $_POST['month'] ?? '';
@@ -400,6 +615,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             
             try {
+                $stmt = $pdo->prepare("SELECT employee_id, bonus_amount FROM employee_salary_bonus WHERE month = ?");
+                $stmt->execute([$month]);
+                $bonusAmounts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
                 // Parse month (YYYY-MM)
                 $year = date('Y', strtotime($month . '-01'));
                 $month_num = date('m', strtotime($month . '-01'));
@@ -417,8 +636,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 
                 // Get all employees (active and inactive)
-                $stmt = $pdo->query("SELECT * FROM employees ORDER BY name ASC");
+                $stmt = $pdo->query("SELECT * FROM employees ORDER BY id ASC");
                 $all_employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                if (empty($all_employees)) {
+                    echo json_encode(['success' => false, 'message' => 'No data available to generate report']);
+                    exit;
+                }
+
+                $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE attendance_date LIKE ?");
+                $stmt->execute([$year . '-' . $month_num . '-%']);
+                $attendanceCount = (int)$stmt->fetchColumn();
+                if ($attendanceCount < 1) {
+                    echo json_encode(['success' => false, 'message' => 'No data available to generate report']);
+                    exit;
+                }
                 
                 $report = [];
                 
@@ -466,6 +698,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                         $salary_info = 'LKR ' . number_format($monthly_salary, 2) . ' / month';
                     }
+
+                    $base_salary = $final_salary;
+                    $bonus_amount = (float)($bonusAmounts[$employee['id']] ?? 0);
+                    $final_salary_with_bonus = $base_salary + $bonus_amount;
                     
                     $report[] = [
                         'id' => $employee['id'],
@@ -473,9 +709,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'name' => $employee['name'],
                         'type' => $employee_type,
                         'salary_info' => $salary_info,
+                        'base_salary' => number_format($base_salary, 2, '.', ''),
+                        'bonus_amount' => number_format($bonus_amount, 2, '.', ''),
                         'present_days' => $present_days,
                         'total_working_days' => $working_days,
-                        'final_salary' => number_format($final_salary, 2, '.', '')
+                        'final_salary' => number_format($final_salary_with_bonus, 2, '.', '')
                     ];
                 }
 
@@ -484,6 +722,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => false, 'message' => 'Error generating report: ' . $e->getMessage()]);
             }
             exit;
+        // ----------------------------------------
+        // Salary View Data
+        // ----------------------------------------
         } elseif ($_POST['action'] === 'load_salary_data') {
             // Load salary data for salary view modal
             $month = $_POST['month'] ?? '';
@@ -494,11 +735,213 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             try {
                 $reportData = $buildMonthlySalaryData($month);
+
+                if (empty($reportData['salaryData'])) {
+                    echo json_encode(['success' => false, 'message' => 'No employee found']);
+                    exit;
+                }
+
+                $year = date('Y', strtotime($month . '-01'));
+                $month_num = date('m', strtotime($month . '-01'));
+                $stmt = $pdo->prepare("SELECT COUNT(*) FROM attendance WHERE attendance_date LIKE ?");
+                $stmt->execute([$year . '-' . $month_num . '-%']);
+                $attendanceCount = (int)$stmt->fetchColumn();
+                if ($attendanceCount < 1) {
+                    echo json_encode(['success' => false, 'message' => 'Attendance data not available']);
+                    exit;
+                }
+
                 echo json_encode(['success' => true, 'salaryData' => $reportData['salaryData']]);
             } catch (Exception $e) {
                 echo json_encode(['success' => false, 'message' => 'Error loading salary data: ' . $e->getMessage()]);
             }
             exit;
+        // ----------------------------------------
+        // Employee Summary Report Data
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'load_employee_management_summary') {
+            $month = $_POST['month'] ?? date('Y-m');
+            if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
+                $month = date('Y-m');
+            }
+
+            try {
+                $stmt = $pdo->query("SELECT * FROM employees ORDER BY id ASC");
+                $allEmployees = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                if (empty($allEmployees)) {
+                    echo json_encode(['success' => false, 'message' => 'No employee data available for report generation']);
+                    exit;
+                }
+
+                $activeEmployees = array_values(array_filter($allEmployees, function ($row) {
+                    return (int)($row['is_active'] ?? 1) === 1;
+                }));
+                $pastEmployees = array_values(array_filter($allEmployees, function ($row) {
+                    return (int)($row['is_active'] ?? 1) === 0;
+                }));
+
+                $salaryDataBlock = $buildMonthlySalaryData($month, true);
+                $salaryData = $salaryDataBlock['salaryData'];
+
+                $monthStart = $month . '-01';
+                $monthEnd = date('Y-m-t', strtotime($monthStart));
+
+                $newJoiners = [];
+                $leftEmployees = [];
+                foreach ($allEmployees as $employee) {
+                    $createdAt = !empty($employee['created_at']) ? substr((string)$employee['created_at'], 0, 10) : '';
+                    if ($createdAt >= $monthStart && $createdAt <= $monthEnd) {
+                        $newJoiners[] = $employee;
+                    }
+
+                    $updatedAt = !empty($employee['updated_at']) ? substr((string)$employee['updated_at'], 0, 10) : '';
+                    if ((int)($employee['is_active'] ?? 1) === 0 && $updatedAt >= $monthStart && $updatedAt <= $monthEnd) {
+                        $leftEmployees[] = [
+                            'uid' => $employee['uid'] ?? 'N/A',
+                            'name' => $employee['name'] ?? 'N/A',
+                            'address' => $employee['address'] ?? 'N/A',
+                            'phone' => $employee['phone'] ?? 'N/A',
+                            'employee_type' => $employee['employee_type'] ?? 'daily_paid',
+                            'daily_wage' => $employee['daily_wage'] ?? 0,
+                            'monthly_salary' => $employee['monthly_salary'] ?? 0,
+                            'exit_type' => 'Inactive',
+                            'exit_date' => $updatedAt,
+                        ];
+                    }
+                }
+
+                $historyStmt = $pdo->prepare("SELECT uid, name, address, phone, employee_type, daily_wage, monthly_salary, deleted_at
+                                              FROM employee_deletion_history
+                                              WHERE deleted_month = ?");
+                $historyStmt->execute([$month]);
+                $archivedLeftEmployees = $historyStmt->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($archivedLeftEmployees as $archived) {
+                    $leftEmployees[] = [
+                        'uid' => $archived['uid'] ?? 'N/A',
+                        'name' => $archived['name'] ?? 'N/A',
+                        'address' => $archived['address'] ?? 'N/A',
+                        'phone' => $archived['phone'] ?? 'N/A',
+                        'employee_type' => $archived['employee_type'] ?? 'daily_paid',
+                        'daily_wage' => $archived['daily_wage'] ?? 0,
+                        'monthly_salary' => $archived['monthly_salary'] ?? 0,
+                        'exit_type' => 'Deleted',
+                        'exit_date' => !empty($archived['deleted_at']) ? substr((string)$archived['deleted_at'], 0, 10) : null,
+                    ];
+                }
+
+                $leftEmployees = array_values(array_reduce($leftEmployees, function ($carry, $employee) {
+                    $key = ($employee['uid'] ?? '') . '|' . ($employee['exit_date'] ?? '');
+                    $carry[$key] = $employee;
+                    return $carry;
+                }, []));
+
+                echo json_encode([
+                    'success' => true,
+                    'month' => $month,
+                    'activeEmployees' => $activeEmployees,
+                    'pastEmployees' => $pastEmployees,
+                    'salaryData' => $salaryData,
+                    'newJoiners' => $newJoiners,
+                    'leftEmployees' => $leftEmployees
+                ]);
+            } catch (Exception $e) {
+                echo json_encode(['success' => false, 'message' => 'Error loading report data: ' . $e->getMessage()]);
+            }
+            exit;
+        // ----------------------------------------
+        // Bonus Allocation
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'apply_salary_bonus') {
+            $month = $_POST['month'] ?? '';
+            $scope = $_POST['scope'] ?? 'single';
+            $identifierType = $_POST['identifier_type'] ?? 'uid';
+            $identifierValue = trim((string)($_POST['identifier_value'] ?? ''));
+            $bonusAmount = $_POST['bonus_amount'] ?? '';
+
+            if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
+                echo json_encode(['success' => false, 'message' => 'Invalid month format']);
+                exit;
+            }
+
+            if (!in_array($scope, ['single', 'all'], true)) {
+                echo json_encode(['success' => false, 'message' => 'Select an employee or choose all employees']);
+                exit;
+            }
+
+            if (!in_array($identifierType, ['uid', 'name'], true)) {
+                echo json_encode(['success' => false, 'message' => 'Select an employee or choose all employees']);
+                exit;
+            }
+
+            if (!is_numeric($bonusAmount) || (float)$bonusAmount < 0) {
+                echo json_encode(['success' => false, 'message' => 'Enter a valid bonus amount']);
+                exit;
+            }
+
+            $bonusAmount = round((float)$bonusAmount, 2);
+
+            try {
+                $pdo->beginTransaction();
+
+                if ($scope === 'all') {
+                    $stmt = $pdo->query("SELECT id FROM employees WHERE is_active = 1");
+                    $employeeIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+                    if (empty($employeeIds)) {
+                        $pdo->rollBack();
+                        echo json_encode(['success' => false, 'message' => 'No active employees found']);
+                        exit;
+                    }
+
+                    $upsert = $pdo->prepare("INSERT INTO employee_salary_bonus (employee_id, month, bonus_amount) VALUES (?, ?, ?)
+                                             ON DUPLICATE KEY UPDATE bonus_amount = VALUES(bonus_amount)");
+                    foreach ($employeeIds as $employeeId) {
+                        $upsert->execute([$employeeId, $month, $bonusAmount]);
+                    }
+
+                    $pdo->commit();
+                    echo json_encode(['success' => true, 'message' => 'Bonus applied to all active employees']);
+                    exit;
+                }
+
+                if (empty($identifierValue)) {
+                    $pdo->rollBack();
+                    echo json_encode(['success' => false, 'message' => 'Select an employee or choose all employees']);
+                    exit;
+                }
+
+                if ($identifierType === 'name') {
+                    $find = $pdo->prepare("SELECT id FROM employees WHERE LOWER(name) = LOWER(?) AND is_active = 1 LIMIT 1");
+                } else {
+                    $find = $pdo->prepare("SELECT id FROM employees WHERE LOWER(uid) = LOWER(?) AND is_active = 1 LIMIT 1");
+                }
+
+                $find->execute([$identifierValue]);
+                $employeeId = $find->fetchColumn();
+
+                if (!$employeeId) {
+                    $pdo->rollBack();
+                    echo json_encode(['success' => false, 'message' => 'Employee not found']);
+                    exit;
+                }
+
+                $upsert = $pdo->prepare("INSERT INTO employee_salary_bonus (employee_id, month, bonus_amount) VALUES (?, ?, ?)
+                                         ON DUPLICATE KEY UPDATE bonus_amount = VALUES(bonus_amount)");
+                $upsert->execute([$employeeId, $month, $bonusAmount]);
+
+                $pdo->commit();
+                echo json_encode(['success' => true, 'message' => 'Bonus applied successfully']);
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                echo json_encode(['success' => false, 'message' => 'Error applying bonus: ' . $e->getMessage()]);
+            }
+            exit;
+        // ----------------------------------------
+        // Payment Status Update
+        // ----------------------------------------
         } elseif ($_POST['action'] === 'set_payment_status') {
             $employeeId = $_POST['employee_id'] ?? '';
             $month = $_POST['month'] ?? '';
@@ -518,6 +961,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => false, 'message' => 'Error updating payment status: ' . $e->getMessage()]);
             }
             exit;
+        // ----------------------------------------
+        // Single Attendance Update
+        // ----------------------------------------
         } elseif ($_POST['action'] === 'update_single_attendance') {
             $employeeId = $_POST['employee_id'] ?? '';
             $attendanceDate = $_POST['attendance_date'] ?? '';
@@ -544,6 +990,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => false, 'message' => 'Error updating attendance: ' . $e->getMessage()]);
             }
             exit;
+        // ----------------------------------------
+        // Attendance Lookup by Date
+        // ----------------------------------------
         }elseif ($_POST['action'] === 'load_attendance') {
             // Load Attendance for Date
             $date = $_POST['date'] ?? '';
@@ -632,7 +1081,7 @@ foreach ($missingUids as $row) {
 }
 
 // Get all active employees
-$stmt = $pdo->query("SELECT * FROM employees WHERE is_active = 1 ORDER BY name ASC");
+$stmt = $pdo->query("SELECT * FROM employees WHERE is_active = 1 ORDER BY id ASC");
 $employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Fix missing monthly_salary values for existing monthly-paid employees (legacy data)
@@ -650,7 +1099,7 @@ foreach ($employees as &$employee) {
 unset($employee);
 
 // Get all past/inactive employees
-$stmt = $pdo->query("SELECT * FROM employees WHERE is_active = 0 ORDER BY name ASC");
+$stmt = $pdo->query("SELECT * FROM employees WHERE is_active = 0 ORDER BY id ASC");
 $pastEmployees = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 foreach ($pastEmployees as &$employee) {
@@ -692,7 +1141,25 @@ if ($editEmployeeId) {
 </div>
 <?php endif; ?>
 
-<div class="d-flex justify-content-between align-items-center mb-4">
+<style>
+/* ========================================
+    Employee Toolbar Styling
+    ======================================== */
+.employee-actions-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 1020;
+    background: #fff;
+    border-bottom: 1px solid #e9ecef;
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+}
+</style>
+
+<!-- ========================================
+    Employee Management Toolbar
+    ======================================== -->
+<div class="d-flex justify-content-between align-items-center mb-4 employee-actions-sticky">
     <h4 class="mb-0">Manage Employees</h4>
     <div>
         <button class="btn btn-primary me-2" data-bs-toggle="modal" data-bs-target="#employeeModal" onclick="resetForm()">
@@ -713,6 +1180,9 @@ if ($editEmployeeId) {
     </div>
 </div>
 
+<!-- ========================================
+    Active Employees Table
+    ======================================== -->
 <div class="card">
     <div class="card-body">
         <h5 class="mb-4 text-primary">Employee Details</h5>
@@ -804,12 +1274,14 @@ if ($editEmployeeId) {
             </table>
         </div>
         <div class="text-end mt-4">
-            <button class="btn btn-primary" onclick="downloadSalaryReport('pdf')"><i class="bi bi-download me-2"></i>Download Report</button>
+            <button class="btn btn-primary" onclick="downloadEmployeeManagementSummary()"><i class="bi bi-download me-2"></i>Download Report</button>
         </div>
     </div>
 </div>
 
-<!-- Add/Edit Employee Modal -->
+<!-- ========================================
+    Add / Edit Employee Modal
+    ======================================== -->
 <div class="modal fade" id="employeeModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -817,7 +1289,7 @@ if ($editEmployeeId) {
                 <h5 class="modal-title" id="employeeModalTitle">Add Employee</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form method="POST" id="employeeForm">
+            <form method="POST" id="employeeForm" novalidate>
                 <div class="modal-body">
                     <input type="hidden" name="action" id="formAction" value="add">
                     <input type="hidden" name="employee_id" id="employeeId" value="">
@@ -830,12 +1302,12 @@ if ($editEmployeeId) {
                     
                     <div class="mb-3">
                         <label for="name" class="form-label">Name <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="name" name="name" required>
+                        <input type="text" class="form-control" id="name" name="name" required title="Name can contain only letters and spaces">
                     </div>
                     
                     <div class="mb-3">
                         <label for="address" class="form-label">Address</label>
-                        <textarea class="form-control" id="address" name="address" rows="2"></textarea>
+                        <textarea class="form-control" id="address" name="address" rows="2" required></textarea>
                     </div>
                     
                     <div class="mb-3">
@@ -848,17 +1320,17 @@ if ($editEmployeeId) {
                     
                     <div class="mb-3" id="daily_wage_field">
                         <label for="daily_wage" class="form-label">Daily Rate / Amount (LKR) <span class="text-danger">*</span></label>
-                        <input type="number" class="form-control" id="daily_wage" name="daily_wage" step="0.01" min="0">
+                        <input type="number" class="form-control" id="daily_wage" name="daily_wage" step="0.01" min="0.01">
                     </div>
                     
                     <div class="mb-3" id="monthly_salary_field" style="display: none;">
                         <label for="monthly_salary" class="form-label">Monthly Salary (LKR)</label>
-                        <input type="number" class="form-control" id="monthly_salary" name="monthly_salary" step="0.01" min="0">
+                        <input type="number" class="form-control" id="monthly_salary" name="monthly_salary" step="0.01" min="0.01">
                     </div>
                     
                     <div class="mb-3">
                         <label for="phone" class="form-label">Phone Number <span class="text-danger">*</span></label>
-                        <input type="tel" class="form-control" id="phone" name="phone" required>
+                        <input type="tel" class="form-control" id="phone" name="phone" required minlength="10" maxlength="10" title="Phone number must be exactly 10 digits">
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -870,7 +1342,9 @@ if ($editEmployeeId) {
     </div>
 </div>
 
-<!-- Mark Attendance Modal -->
+<!-- ========================================
+    Attendance & Report Modal
+    ======================================== -->
 <div class="modal fade" id="attendanceModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
@@ -970,8 +1444,8 @@ if ($editEmployeeId) {
                         </div>
                         <div class="col-md-4 d-flex align-items-end">
                             <button type="button" class="btn btn-success me-2" onclick="generateReport()">Generate Report</button>
-                            <button type="button" class="btn btn-outline-primary me-2" onclick="exportReport('csv')">Export CSV</button>
-                            <button type="button" class="btn btn-outline-secondary" onclick="exportReport('pdf')">Export PDF</button>
+                            <button type="button" class="btn btn-outline-primary me-2" onclick="exportReport('csv')">Download CSV</button>
+                            <button type="button" class="btn btn-outline-secondary" onclick="exportReport('pdf')">Download PDF</button>
                         </div>
                     </div>
 
@@ -985,6 +1459,8 @@ if ($editEmployeeId) {
                                         <th>Name</th>
                                         <th>Type</th>
                                         <th>Salary/Rate</th>
+                                        <th>Base Salary</th>
+                                        <th>Bonus</th>
                                         <th>Present Days</th>
                                         <th>Total Working Days</th>
                                         <th>Final Salary</th>
@@ -1006,7 +1482,9 @@ if ($editEmployeeId) {
     </div>
 </div>
 
-<!-- View Employee Salary Modal -->
+<!-- ========================================
+    Salary / Bonus Modal
+    ======================================== -->
 <div class="modal fade" id="salaryModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
@@ -1016,18 +1494,18 @@ if ($editEmployeeId) {
             </div>
             <div class="modal-body">
                 <div class="row mb-3">
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label for="salaryMonth" class="form-label">Select Month</label>
                         <input type="month" class="form-control" id="salaryMonth" value="<?= date('Y-m') ?>">
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label for="salarySearch" class="form-label">Search Employee</label>
                         <input type="text" class="form-control" id="salarySearch" placeholder="Search by UID or name...">
                     </div>
-                    <div class="col-md-4 d-flex align-items-end">
+                    <div class="col-md-6 d-flex align-items-end">
                         <button type="button" class="btn btn-primary me-2" onclick="loadSalaryData()">Load Salaries</button>
-                        <button type="button" class="btn btn-success me-2" onclick="downloadSalaryReport('pdf')">Generate Report</button>
-                        <button type="button" class="btn btn-outline-primary" onclick="downloadSalaryReport('csv')">CSV</button>
+                        <button type="button" class="btn btn-warning me-2" onclick="openBonusModal()">Calculate Bonus</button>
+                        <button type="button" class="btn btn-success" onclick="downloadSalaryReport()">Download PDF</button>
                     </div>
                 </div>
 
@@ -1039,17 +1517,70 @@ if ($editEmployeeId) {
                                 <th>Employee Name</th>
                                 <th>Employee Type</th>
                                 <th>Calculated Salary</th>
+                                <th>Bonus</th>
+                                <th>Final Salary</th>
                                 <th>Action</th>
                                 <th>Payment Status</th>
                             </tr>
                         </thead>
                         <tbody id="salaryTableBody">
                             <tr>
-                                <td colspan="6" class="text-center text-muted">Select month and click Load Salaries</td>
+                                <td colspan="8" class="text-center text-muted">Select month and click Load Salaries</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Calculate Bonus Modal -->
+<div class="modal fade" id="bonusModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Calculate Bonus</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted mb-3">Selected Month: <strong id="bonusSelectedMonth">-</strong></p>
+
+                <div class="mb-3">
+                    <label class="form-label">Apply Bonus To</label>
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="bonusScope" id="bonusScopeSingle" value="single" checked onchange="toggleBonusScopeFields()">
+                        <label class="form-check-label" for="bonusScopeSingle">Select Single Employee</label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="bonusScope" id="bonusScopeAll" value="all" onchange="toggleBonusScopeFields()">
+                        <label class="form-check-label" for="bonusScopeAll">Select All Employees</label>
+                    </div>
+                </div>
+
+                <div id="singleEmployeeBonusFields">
+                    <div class="mb-3">
+                        <label for="bonusIdentifierType" class="form-label">Find Employee By</label>
+                        <select id="bonusIdentifierType" class="form-select" onchange="refreshBonusIdentifierList()">
+                            <option value="uid">Employee ID (UID)</option>
+                            <option value="name">Employee Name</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="bonusIdentifierValue" class="form-label">Employee ID / Name</label>
+                        <input type="text" id="bonusIdentifierValue" class="form-control" list="bonusIdentifierList" placeholder="Enter exact employee ID or name">
+                        <datalist id="bonusIdentifierList"></datalist>
+                    </div>
+                </div>
+
+                <div class="mb-2">
+                    <label for="bonusAmount" class="form-label">Bonus Amount (LKR)</label>
+                    <input type="number" class="form-control" id="bonusAmount" min="0" step="0.01" placeholder="Enter bonus amount">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-warning" onclick="applySalaryBonus()">Apply Bonus</button>
             </div>
         </div>
     </div>
@@ -1228,6 +1759,9 @@ if ($editEmployeeId) {
                                     <button class="btn btn-sm btn-outline-success" onclick="reactivateEmployee(<?= $employee['id'] ?>, '<?= htmlspecialchars($employee['name'] ?? 'Employee') ?>')">
                                         <i class="bi bi-arrow-counterclockwise"></i> Reactivate
                                     </button>
+                                    <button class="btn btn-sm btn-outline-danger ms-1" onclick="permanentlyDeleteEmployee(<?= $employee['id'] ?>, '<?= htmlspecialchars($employee['name'] ?? 'Employee') ?>')">
+                                        <i class="bi bi-trash3"></i> Delete Permanently
+                                    </button>
                                 </td>
                             </tr>
                             <?php endforeach; ?>
@@ -1241,11 +1775,132 @@ if ($editEmployeeId) {
 </div>
 
 <script>
+// ========================================
+// Employee Management Client State
+// ========================================
 let deleteEmployeeId = null;
 let employeeData = <?= json_encode($employees) ?>;
 let allEmployeeData = <?= json_encode($allEmployees) ?>;
 let salaryDataCache = [];
 
+// ========================================
+// Bonus Workflow
+// ========================================
+function openBonusModal() {
+    const month = document.getElementById('salaryMonth').value;
+    if (!month) {
+        alert('Please select a month first');
+        return;
+    }
+
+    document.getElementById('bonusSelectedMonth').textContent = month;
+    document.getElementById('bonusScopeSingle').checked = true;
+    document.getElementById('bonusIdentifierType').value = 'uid';
+    document.getElementById('bonusIdentifierValue').value = '';
+    document.getElementById('bonusAmount').value = '';
+
+    toggleBonusScopeFields();
+    refreshBonusIdentifierList();
+
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('bonusModal'));
+    modal.show();
+}
+
+function resetBonusForm() {
+    document.getElementById('bonusScopeSingle').checked = true;
+    document.getElementById('bonusIdentifierType').value = 'uid';
+    document.getElementById('bonusIdentifierValue').value = '';
+    document.getElementById('bonusAmount').value = '';
+    toggleBonusScopeFields();
+    refreshBonusIdentifierList();
+}
+
+function toggleBonusScopeFields() {
+    const scope = document.querySelector('input[name="bonusScope"]:checked')?.value || 'single';
+    document.getElementById('singleEmployeeBonusFields').style.display = scope === 'single' ? 'block' : 'none';
+}
+
+function refreshBonusIdentifierList() {
+    const type = document.getElementById('bonusIdentifierType').value;
+    const datalist = document.getElementById('bonusIdentifierList');
+    const source = salaryDataCache.length > 0 ? salaryDataCache : employeeData;
+
+    const values = source
+        .map(emp => type === 'name' ? String(emp.name || '').trim() : String(emp.uid || '').trim())
+        .filter(v => v !== '');
+
+    datalist.innerHTML = values
+        .filter((value, index, arr) => arr.indexOf(value) === index)
+        .slice(0, 200)
+        .map(value => `<option value="${value.replace(/"/g, '&quot;')}"></option>`)
+        .join('');
+}
+
+function applySalaryBonus() {
+    const month = document.getElementById('salaryMonth').value;
+    const scope = document.querySelector('input[name="bonusScope"]:checked')?.value || 'single';
+    const bonusAmount = parseFloat(document.getElementById('bonusAmount').value || '');
+    const identifierType = document.getElementById('bonusIdentifierType').value;
+    const identifierValue = (document.getElementById('bonusIdentifierValue').value || '').trim();
+
+    if (!month) {
+        alert('Please select a month');
+        return;
+    }
+
+    if (!['single', 'all'].includes(scope)) {
+        alert('Select an employee or choose all employees');
+        return;
+    }
+
+    if (!Number.isFinite(bonusAmount) || bonusAmount < 0) {
+        alert('Enter a valid bonus amount');
+        return;
+    }
+
+    if (scope === 'single' && !identifierValue) {
+        alert('Select an employee or choose all employees');
+        return;
+    }
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'apply_salary_bonus',
+            month: month,
+            scope: scope,
+            identifier_type: identifierType,
+            identifier_value: identifierValue,
+            bonus_amount: bonusAmount
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'Failed to apply bonus');
+            return;
+        }
+
+        const modalEl = document.getElementById('bonusModal');
+        const modalInstance = bootstrap.Modal.getOrCreateInstance(modalEl);
+        modalInstance.hide();
+        resetBonusForm();
+
+        alert(data.message || 'Bonus applied successfully');
+        loadSalaryData();
+    })
+    .catch(error => {
+        console.error('Error applying bonus:', error);
+        alert('Error applying bonus');
+    });
+}
+
+// ========================================
+// Salary View Workflow
+// ========================================
 function loadSalaryData() {
     const month = document.getElementById('salaryMonth').value;
     if (!month) {
@@ -1254,7 +1909,7 @@ function loadSalaryData() {
     }
 
     const tbody = document.getElementById('salaryTableBody');
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center">Loading salary details...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center">Loading salary details...</td></tr>';
 
     fetch('?page=employees', {
         method: 'POST',
@@ -1269,7 +1924,7 @@ function loadSalaryData() {
     .then(response => response.json())
     .then(data => {
         if (!data.success) {
-            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">' + (data.message || 'Failed to load salary data') + '</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger">' + (data.message || 'Failed to load salary data') + '</td></tr>';
             return;
         }
 
@@ -1278,7 +1933,7 @@ function loadSalaryData() {
     })
     .catch(error => {
         console.error('Error loading salary data:', error);
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">Error loading salary data</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger">Error loading salary data</td></tr>';
     });
 }
 
@@ -1293,7 +1948,7 @@ function renderSalaryTable() {
     });
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No employees found for selected month/filter</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No employees found for selected month/filter</td></tr>';
         return;
     }
 
@@ -1301,12 +1956,17 @@ function renderSalaryTable() {
         const typeLabel = emp.type === 'daily_paid' ? 'Daily Paid' : 'Monthly Paid';
         const typeBadge = emp.type === 'daily_paid' ? 'bg-warning' : 'bg-info';
         const status = emp.payment_status === 'paid' ? 'paid' : 'pending';
+        const baseSalary = parseFloat(emp.base_salary || emp.final_salary || 0).toFixed(2);
+        const bonus = parseFloat(emp.bonus_amount || 0).toFixed(2);
+        const finalWithBonus = parseFloat(emp.final_salary_with_bonus || (parseFloat(baseSalary) + parseFloat(bonus))).toFixed(2);
         return `
             <tr>
                 <td><strong>${emp.uid || 'N/A'}</strong></td>
                 <td>${emp.name || 'N/A'}</td>
                 <td><span class="badge ${typeBadge}">${typeLabel}</span></td>
-                <td><strong>LKR ${parseFloat(emp.final_salary || 0).toFixed(2)}</strong></td>
+                <td><strong>LKR ${baseSalary}</strong></td>
+                <td><strong>LKR ${bonus}</strong></td>
+                <td><strong>LKR ${finalWithBonus}</strong></td>
                 <td>
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="openAttendanceEdit(${emp.id}, '${String(emp.uid || '').replace(/'/g, "\\'")}', '${String(emp.name || '').replace(/'/g, "\\'")}')">
                         <i class="bi bi-pencil-square me-1"></i>Edit Attendance
@@ -1412,13 +2072,104 @@ function saveAttendanceEdit() {
     });
 }
 
-function downloadSalaryReport(format) {
+function downloadSalaryReport() {
     const month = document.getElementById('salaryMonth').value;
     if (!month) {
         alert('Please select a month');
         return;
     }
-    window.open(`?page=employees&action=download_salary_report&month=${encodeURIComponent(month)}&format=${encodeURIComponent(format)}`, '_blank');
+
+    if (!Array.isArray(salaryDataCache) || salaryDataCache.length === 0) {
+        alert('No data available to generate report');
+        return;
+    }
+
+    if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
+        window.open(`?page=employees&action=download_salary_report&month=${encodeURIComponent(month)}`, '_blank');
+        return;
+    }
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+    const generatedAt = new Date().toLocaleString();
+    const companyName = 'BluePeak Systems';
+
+    doc.setFillColor(22, 91, 170);
+    doc.rect(0, 0, 297, 26, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.text(companyName, 14, 11);
+    doc.setFontSize(14);
+    doc.text('Employee Payroll Report', 14, 20);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.text(`Date Generated: ${generatedAt}`, 210, 11);
+    doc.text(`Payroll Month: ${month}`, 210, 20);
+
+    const rows = salaryDataCache.map(emp => {
+        const typeLabel = emp.type === 'daily_paid' ? 'Daily Paid' : 'Monthly Paid';
+        const baseSalary = parseFloat(emp.base_salary || emp.final_salary || 0).toFixed(2);
+        const bonus = parseFloat(emp.bonus_amount || 0).toFixed(2);
+        const finalWithBonus = parseFloat(emp.final_salary_with_bonus || (parseFloat(baseSalary) + parseFloat(bonus))).toFixed(2);
+        const paymentStatus = String(emp.payment_status || 'pending').toLowerCase() === 'paid' ? 'Paid' : 'Pending';
+        return [
+            emp.uid || 'N/A',
+            emp.name || 'N/A',
+            typeLabel,
+            `LKR ${baseSalary}`,
+            `LKR ${bonus}`,
+            `LKR ${finalWithBonus}`,
+            paymentStatus
+        ];
+    });
+
+    const totalEmployees = salaryDataCache.length;
+    const totalBasicSalary = salaryDataCache.reduce((sum, e) => sum + parseFloat(e.base_salary || e.final_salary || 0), 0);
+    const totalBonus = salaryDataCache.reduce((sum, e) => sum + parseFloat(e.bonus_amount || 0), 0);
+    const totalPaidSalary = salaryDataCache.reduce((sum, e) => {
+        const status = String(e.payment_status || 'pending').toLowerCase();
+        const finalSalary = parseFloat(e.final_salary_with_bonus || (parseFloat(e.base_salary || e.final_salary || 0) + parseFloat(e.bonus_amount || 0)));
+        return status === 'paid' ? sum + finalSalary : sum;
+    }, 0);
+    const totalPendingSalary = salaryDataCache.reduce((sum, e) => {
+        const status = String(e.payment_status || 'pending').toLowerCase();
+        const finalSalary = parseFloat(e.final_salary_with_bonus || (parseFloat(e.base_salary || e.final_salary || 0) + parseFloat(e.bonus_amount || 0)));
+        return status === 'pending' ? sum + finalSalary : sum;
+    }, 0);
+
+    doc.autoTable({
+        startY: 32,
+        head: [['Employee ID', 'Employee Name', 'Salary Type', 'Base Salary', 'Bonus', 'Final Salary', 'Payment Status']],
+        body: rows,
+        theme: 'grid',
+        headStyles: { fillColor: [22, 91, 170], textColor: [255, 255, 255], fontStyle: 'bold' },
+        bodyStyles: { textColor: [33, 37, 41], fontSize: 9 },
+        alternateRowStyles: { fillColor: [245, 247, 250] },
+        styles: { cellPadding: 2.5, lineColor: [220, 226, 232], lineWidth: 0.1 },
+        tableWidth: 'auto',
+        margin: { left: 8, right: 8 },
+        horizontalPageBreak: true,
+        horizontalPageBreakRepeat: 0
+    });
+
+    const summaryY = doc.lastAutoTable.finalY + 8;
+    doc.setFillColor(240, 244, 248);
+    doc.rect(14, summaryY, 269, 30, 'F');
+    doc.setTextColor(35, 35, 35);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text('Summary', 16, summaryY + 6);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.text(`Total Employees: ${totalEmployees}`, 16, summaryY + 13);
+    doc.text(`Total Basic Salary: LKR ${totalBasicSalary.toFixed(2)}`, 16, summaryY + 20);
+    doc.text(`Total Bonus: LKR ${totalBonus.toFixed(2)}`, 110, summaryY + 13);
+    doc.text(`Total Paid Salary: LKR ${totalPaidSalary.toFixed(2)}`, 110, summaryY + 20);
+    doc.text(`Total Salary To Be Paid: LKR ${totalPendingSalary.toFixed(2)}`, 205, summaryY + 13);
+
+    doc.save(`employee-payroll-report-${month}.pdf`);
 }
 
 function resetForm() {
@@ -1478,6 +2229,19 @@ function reactivateEmployee(id, name) {
         document.body.appendChild(form);
         form.submit();
     }
+}
+
+function permanentlyDeleteEmployee(id, name) {
+    const message = 'Are you sure you want to permanently delete this employee?\n\nEmployee: ' + name;
+    if (!confirm(message)) {
+        return;
+    }
+
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.innerHTML = '<input type="hidden" name="action" value="permanent_delete"><input type="hidden" name="employee_id" value="' + id + '">';
+    document.body.appendChild(form);
+    form.submit();
 }
 
 function updateWageFields() {
@@ -1703,7 +2467,7 @@ function generateReport() {
 
     // Show loading
     document.getElementById('reportContainer').style.display = 'block';
-    document.getElementById('reportBody').innerHTML = '<tr><td colspan="7" class="text-center">Generating report...</td></tr>';
+    document.getElementById('reportBody').innerHTML = '<tr><td colspan="9" class="text-center">Generating report...</td></tr>';
 
     // Fetch report data
     fetch('?page=employees', {
@@ -1721,12 +2485,12 @@ function generateReport() {
         if (data.success) {
             displayReport(data.report);
         } else {
-            document.getElementById('reportBody').innerHTML = '<tr><td colspan="7" class="text-center text-danger">Error generating report: ' + data.message + '</td></tr>';
+            document.getElementById('reportBody').innerHTML = '<tr><td colspan="9" class="text-center text-danger">Error generating report: ' + data.message + '</td></tr>';
         }
     })
     .catch(error => {
         console.error('Error:', error);
-        document.getElementById('reportBody').innerHTML = '<tr><td colspan="6" class="text-center text-danger">Error generating report</td></tr>';
+        document.getElementById('reportBody').innerHTML = '<tr><td colspan="9" class="text-center text-danger">Error generating report</td></tr>';
     });
 }
 
@@ -1735,7 +2499,7 @@ function displayReport(reportData) {
     tbody.innerHTML = '';
 
     if (reportData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No data found for selected month</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No data found for selected month</td></tr>';
         return;
     }
 
@@ -1754,6 +2518,8 @@ function displayReport(reportData) {
                 </span>
             </td>
             <td>${employee.salary_info}</td>
+            <td><strong>LKR ${parseFloat(employee.base_salary || 0).toFixed(2)}</strong></td>
+            <td><strong>LKR ${parseFloat(employee.bonus_amount || 0).toFixed(2)}</strong></td>
             <td>${employee.present_days}</td>
             <td>${employee.total_working_days}</td>
             <td><strong>LKR ${parseFloat(employee.final_salary).toFixed(2)}</strong></td>
@@ -1778,7 +2544,7 @@ function exportReport(format = 'csv') {
     );
 
     if (visibleRows.length === 0) {
-        alert('No data to export');
+        alert('No data available to generate report');
         return;
     }
 
@@ -1792,14 +2558,14 @@ function exportReport(format = 'csv') {
         if (isSingleEmployee) {
             csv = 'Field,Value\n';
             const cells = visibleRows[0].querySelectorAll('td');
-            const headers = ['UID', 'Name', 'Type', 'Salary/Rate', 'Present Days', 'Total Working Days', 'Final Salary'];
+            const headers = ['UID', 'Name', 'Type', 'Salary/Rate', 'Base Salary', 'Bonus', 'Present Days', 'Total Working Days', 'Final Salary'];
 
             headers.forEach((header, index) => {
                 const value = cells[index] ? cells[index].textContent.trim() : '';
                 csv += `"${header}","${value.replace(/"/g, '""')}"\n`;
             });
         } else {
-            csv = 'UID,Name,Type,Salary/Rate,Present Days,Total Working Days,Final Salary\n';
+            csv = 'UID,Name,Type,Salary/Rate,Base Salary,Bonus,Present Days,Total Working Days,Final Salary\n';
             visibleRows.forEach(row => {
                 const cells = row.querySelectorAll('td');
                 const data = Array.from(cells).map(cell => {
@@ -1835,7 +2601,7 @@ function exportReport(format = 'csv') {
 
     if (isSingleEmployee) {
         const cells = visibleRows[0].querySelectorAll('td');
-        const headers = ['UID', 'Name', 'Type', 'Salary/Rate', 'Present Days', 'Total Working Days', 'Final Salary'];
+        const headers = ['UID', 'Name', 'Type', 'Salary/Rate', 'Base Salary', 'Bonus', 'Present Days', 'Total Working Days', 'Final Salary'];
         const data = headers.map((h, idx) => [h, cells[idx] ? cells[idx].textContent.trim() : '']);
 
         doc.autoTable({
@@ -1854,7 +2620,7 @@ function exportReport(format = 'csv') {
         doc.autoTable({
             startY: 28,
             theme: 'striped',
-            head: [['UID', 'Name', 'Type', 'Salary/Rate', 'Present Days', 'Total Working Days', 'Final Salary']],
+            head: [['UID', 'Name', 'Type', 'Salary/Rate', 'Base Salary', 'Bonus', 'Present Days', 'Total Working Days', 'Final Salary']],
             body: rows,
             styles: { fontSize: 9 }
         });
@@ -1862,6 +2628,320 @@ function exportReport(format = 'csv') {
 
     doc.save(`${filenameBase}.pdf`);
 }
+
+// ========================================
+// Full Management Summary PDF
+// ========================================
+function downloadEmployeeManagementSummary() {
+    const month = document.getElementById('salaryMonth') ? document.getElementById('salaryMonth').value : new Date().toISOString().slice(0, 7);
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'load_employee_management_summary',
+            month: month
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'No employee data available for report generation');
+            return;
+        }
+
+        const activeEmployees = Array.isArray(data.activeEmployees) ? data.activeEmployees : [];
+        const salaryRows = Array.isArray(data.salaryData) ? data.salaryData : [];
+        const newJoiners = Array.isArray(data.newJoiners) ? data.newJoiners : [];
+        const leftEmployees = Array.isArray(data.leftEmployees) ? data.leftEmployees : [];
+
+        if (activeEmployees.length === 0 && salaryRows.length === 0) {
+            alert('No employee data available for report generation');
+            return;
+        }
+
+        if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
+            alert('PDF generation library is not available.');
+            return;
+        }
+
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+        const companyName = 'BluePeak Systems';
+        const reportMonth = data.month || month;
+        const generatedAt = new Date().toLocaleString();
+        const paymentStatusByUid = salaryRows.reduce((map, row) => {
+            const uid = String(row.uid || '').trim();
+            if (uid !== '') {
+                map[uid] = String(row.payment_status || 'pending').toLowerCase() === 'paid' ? 'Paid' : 'Pending';
+            }
+            return map;
+        }, {});
+
+        doc.setFillColor(26, 82, 156);
+        doc.rect(0, 0, 297, 28, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(16);
+        doc.text(companyName, 14, 11);
+        doc.setFontSize(14);
+        doc.text('Employee Management Summary Report', 14, 21);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(`Date of Download: ${generatedAt}`, 210, 11);
+        doc.text(`Month: ${reportMonth}`, 210, 21);
+
+        let y = 34;
+
+        const sectionTitle = (title) => {
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(12);
+            doc.setTextColor(26, 82, 156);
+            doc.text(title, 14, y);
+            y += 2;
+        };
+
+        // Employee Details Section
+        sectionTitle('Employee Details');
+        const employeeDetailRows = activeEmployees.map(emp => {
+            const rawType = String(emp.employee_type || '').toLowerCase();
+            const salaryType = rawType.includes('month') ? 'Monthly' : 'Daily';
+            const baseSalary = rawType.includes('month')
+                ? parseFloat(emp.monthly_salary || 0)
+                : parseFloat(emp.daily_wage || 0);
+            return [
+                emp.uid || 'N/A',
+                emp.name || 'N/A',
+                emp.address || 'N/A',
+                emp.phone || 'N/A',
+                salaryType,
+                `LKR ${baseSalary.toFixed(2)}`,
+                (parseInt(emp.is_active, 10) === 1 ? 'Active' : 'Inactive'),
+                paymentStatusByUid[String(emp.uid || '').trim()] || 'Pending'
+            ];
+        });
+
+        doc.autoTable({
+            startY: y + 2,
+            head: [['Employee ID', 'Name', 'Address', 'Phone Number', 'Salary Type', 'Base Salary', 'Status', 'Payment Status']],
+            body: employeeDetailRows,
+            theme: 'grid',
+            headStyles: { fillColor: [26, 82, 156], textColor: [255, 255, 255], fontStyle: 'bold' },
+            alternateRowStyles: { fillColor: [246, 248, 251] },
+            styles: { fontSize: 8.1, cellPadding: 1.8, lineColor: [221, 227, 235], lineWidth: 0.1 },
+            tableWidth: 'auto',
+            margin: { left: 8, right: 8 }
+        });
+        y = doc.lastAutoTable.finalY + 8;
+
+        // Salary Section
+        sectionTitle('Employee Salary Details');
+        const salarySectionRows = salaryRows.map(row => {
+            const base = parseFloat(row.base_salary || row.final_salary || 0);
+            const bonus = parseFloat(row.bonus_amount || 0);
+            const finalSalary = parseFloat(row.final_salary_with_bonus || (base + bonus));
+            const isPaid = String(row.payment_status || 'pending').toLowerCase() === 'paid';
+            return [
+                row.uid || 'N/A',
+                row.name || 'N/A',
+                row.address || 'N/A',
+                row.phone || 'N/A',
+                row.type === 'monthly_paid' ? 'Monthly' : 'Daily',
+                `LKR ${base.toFixed(2)}`,
+                `LKR ${bonus.toFixed(2)}`,
+                isPaid ? `LKR ${finalSalary.toFixed(2)}` : 'LKR 0.00',
+                isPaid ? 'LKR 0.00' : `LKR ${finalSalary.toFixed(2)}`,
+                `LKR ${finalSalary.toFixed(2)}`,
+                isPaid ? 'Paid' : 'Pending'
+            ];
+        });
+
+        doc.autoTable({
+            startY: y + 2,
+            head: [['Employee ID', 'Name', 'Address', 'Phone Number', 'Salary Type', 'Base Salary', 'Bonus', 'Paid Salary', 'Pending Salary', 'Final Salary', 'Payment Status']],
+            body: salarySectionRows,
+            theme: 'grid',
+            headStyles: { fillColor: [26, 82, 156], textColor: [255, 255, 255], fontStyle: 'bold' },
+            alternateRowStyles: { fillColor: [246, 248, 251] },
+            styles: { fontSize: 7.2, cellPadding: 1.6, lineColor: [221, 227, 235], lineWidth: 0.1 },
+            tableWidth: 'auto',
+            margin: { left: 8, right: 8 },
+            horizontalPageBreak: true,
+            horizontalPageBreakRepeat: 0
+        });
+        y = doc.lastAutoTable.finalY + 8;
+
+        // New Joiners Section
+        sectionTitle('New Joiners This Month');
+        const newJoinerRows = newJoiners.map(emp => {
+            const rawType = String(emp.employee_type || '').toLowerCase();
+            const salary = rawType.includes('month')
+                ? parseFloat(emp.monthly_salary || 0)
+                : parseFloat(emp.daily_wage || 0);
+            return [
+                emp.uid || 'N/A',
+                emp.name || 'N/A',
+                emp.address || 'N/A',
+                emp.phone || 'N/A',
+                emp.created_at ? String(emp.created_at).slice(0, 10) : 'N/A',
+                `LKR ${salary.toFixed(2)}`
+            ];
+        });
+
+        doc.autoTable({
+            startY: y + 2,
+            head: [['Employee ID', 'Name', 'Address', 'Phone Number', 'Joining Date', 'Salary']],
+            body: newJoinerRows.length ? newJoinerRows : [['-', 'No new joiners this month', '-', '-', '-', '-']],
+            theme: 'grid',
+            headStyles: { fillColor: [26, 82, 156], textColor: [255, 255, 255], fontStyle: 'bold' },
+            alternateRowStyles: { fillColor: [246, 248, 251] },
+            styles: { fontSize: 8.8, cellPadding: 2.2, lineColor: [221, 227, 235], lineWidth: 0.1 }
+        });
+        y = doc.lastAutoTable.finalY + 8;
+
+        // Left Employees Section
+        sectionTitle('Employees Who Left This Month');
+        const leftRows = leftEmployees.map(emp => {
+            const rawType = String(emp.employee_type || '').toLowerCase();
+            const salary = rawType.includes('month')
+                ? parseFloat(emp.monthly_salary || 0)
+                : parseFloat(emp.daily_wage || 0);
+            return [
+                emp.uid || 'N/A',
+                emp.name || 'N/A',
+                emp.address || 'N/A',
+                emp.phone || 'N/A',
+                `LKR ${salary.toFixed(2)}`,
+                emp.exit_type || 'Inactive',
+                emp.exit_date || (emp.updated_at ? String(emp.updated_at).slice(0, 10) : 'N/A')
+            ];
+        });
+
+        doc.autoTable({
+            startY: y + 2,
+            head: [['Employee ID', 'Name', 'Address', 'Phone Number', 'Salary', 'Exit Type', 'Exit Date']],
+            body: leftRows.length ? leftRows : [['-', 'No employees left this month', '-', '-', '-', '-', '-']],
+            theme: 'grid',
+            headStyles: { fillColor: [26, 82, 156], textColor: [255, 255, 255], fontStyle: 'bold' },
+            alternateRowStyles: { fillColor: [246, 248, 251] },
+            styles: { fontSize: 8.8, cellPadding: 2.2, lineColor: [221, 227, 235], lineWidth: 0.1 }
+        });
+        y = doc.lastAutoTable.finalY + 8;
+
+        // Summary Section
+        const totalBasicSalary = salaryRows.reduce((sum, row) => sum + parseFloat(row.base_salary || row.final_salary || 0), 0);
+        const totalBonusGiven = salaryRows.reduce((sum, row) => sum + parseFloat(row.bonus_amount || 0), 0);
+        const totalPaidSalary = salaryRows.reduce((sum, row) => {
+            const base = parseFloat(row.base_salary || row.final_salary || 0);
+            const bonus = parseFloat(row.bonus_amount || 0);
+            const finalSalary = parseFloat(row.final_salary_with_bonus || (base + bonus));
+            return String(row.payment_status || 'pending').toLowerCase() === 'paid' ? sum + finalSalary : sum;
+        }, 0);
+        const totalPendingSalary = salaryRows.reduce((sum, row) => {
+            const base = parseFloat(row.base_salary || row.final_salary || 0);
+            const bonus = parseFloat(row.bonus_amount || 0);
+            const finalSalary = parseFloat(row.final_salary_with_bonus || (base + bonus));
+            return String(row.payment_status || 'pending').toLowerCase() === 'pending' ? sum + finalSalary : sum;
+        }, 0);
+
+        sectionTitle('Summary');
+        doc.setFillColor(240, 244, 249);
+        doc.rect(14, y + 1, 269, 26, 'F');
+        doc.setTextColor(35, 35, 35);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(`Total Employees: ${activeEmployees.length}`, 16, y + 8);
+        doc.text(`New Joiners (this month): ${newJoiners.length}`, 16, y + 15);
+        doc.text(`Total Basic Salary: LKR ${totalBasicSalary.toFixed(2)}`, 16, y + 22);
+
+        doc.text(`Total Bonus Given: LKR ${totalBonusGiven.toFixed(2)}`, 110, y + 8);
+        doc.text(`Total Paid Salary: LKR ${totalPaidSalary.toFixed(2)}`, 110, y + 15);
+        doc.text(`Total Pending Salary: LKR ${totalPendingSalary.toFixed(2)}`, 110, y + 22);
+
+        doc.save(`employee-management-summary-${reportMonth}.pdf`);
+    })
+    .catch(error => {
+        console.error('Error generating summary report:', error);
+        alert('No employee data available for report generation');
+    });
+}
+
+document.getElementById('employeeForm').addEventListener('submit', function(e) {
+    const name = (document.getElementById('name').value || '').trim();
+    const phone = (document.getElementById('phone').value || '').trim();
+    const address = (document.getElementById('address').value || '').trim();
+    const type = document.getElementById('employee_type').value;
+    const daily = parseFloat(document.getElementById('daily_wage').value || '0');
+    const monthly = parseFloat(document.getElementById('monthly_salary').value || '0');
+
+    const requiredTargets = [
+        document.getElementById('name'),
+        document.getElementById('phone'),
+        document.getElementById('address'),
+        document.getElementById('employee_type')
+    ];
+
+    if (type === 'daily_paid') {
+        requiredTargets.push(document.getElementById('daily_wage'));
+    } else if (type === 'monthly_paid') {
+        requiredTargets.push(document.getElementById('monthly_salary'));
+    }
+
+    requiredTargets.forEach(el => el.classList.remove('is-invalid'));
+    let hasMissing = false;
+    requiredTargets.forEach(el => {
+        const value = (el.value || '').toString().trim();
+        if (!value || ((el.id === 'daily_wage' || el.id === 'monthly_salary') && parseFloat(value) <= 0)) {
+            el.classList.add('is-invalid');
+            hasMissing = true;
+        }
+    });
+
+    if (hasMissing) {
+        e.preventDefault();
+        alert('Please fill all required fields');
+        return;
+    }
+
+    if (!/^[A-Za-z ]+$/.test(name)) {
+        e.preventDefault();
+        alert('Name is required and must contain only letters and spaces.');
+        return;
+    }
+
+    if (!/^\d{10}$/.test(phone)) {
+        e.preventDefault();
+        alert('Phone Number is required and must be exactly 10 digits.');
+        return;
+    }
+
+    if (!address) {
+        e.preventDefault();
+        alert('Address is required.');
+        return;
+    }
+
+    if (!['daily_paid', 'monthly_paid'].includes(type)) {
+        e.preventDefault();
+        alert('Salary Type is required.');
+        return;
+    }
+
+    if (type === 'daily_paid' && (!Number.isFinite(daily) || daily <= 0)) {
+        e.preventDefault();
+        alert('Please provide a valid Daily Rate / Amount.');
+        return;
+    }
+
+    if (type === 'monthly_paid' && (!Number.isFinite(monthly) || monthly <= 0)) {
+        e.preventDefault();
+        alert('Please provide a valid Monthly Salary.');
+        return;
+    }
+});
 </script>
 
 <?php include 'footer.php'; ?>
