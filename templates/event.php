@@ -722,6 +722,7 @@ $eventDateFrom = $filters['event_date_from'];
 $eventDateTo = $filters['event_date_to'];
 $minTotal = $filters['min_total'];
 $maxTotal = $filters['max_total'];
+$calendarSourceBills = $getFilteredEventBills([])['bills'];
 $period = $_GET['period'] ?? '';
 if (!in_array($period, ['today', 'month'], true)) {
     $period = '';
@@ -737,6 +738,32 @@ if ($period === 'today') {
         return isset($bill['created_at']) && date('Y-m', strtotime($bill['created_at'])) === $currentYearMonth;
     }));
 }
+
+$eventCalendarEventsByDate = [];
+$eventCalendarEventIdByDate = [];
+foreach ($calendarSourceBills as $bill) {
+    $eventDate = trim((string)($bill['event_date'] ?? ''));
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $eventDate)) {
+        continue;
+    }
+
+    $eventDateObj = DateTime::createFromFormat('Y-m-d', $eventDate);
+    if (!$eventDateObj || $eventDateObj->format('Y-m-d') !== $eventDate) {
+        continue;
+    }
+
+    if (!isset($eventCalendarEventsByDate[$eventDate])) {
+        $eventCalendarEventsByDate[$eventDate] = 0;
+    }
+    $eventCalendarEventsByDate[$eventDate]++;
+
+    if (!isset($eventCalendarEventIdByDate[$eventDate])) {
+        $eventCalendarEventIdByDate[$eventDate] = intval($bill['id'] ?? 0);
+    }
+}
+
+$eventCalendarEventsByDateJson = json_encode($eventCalendarEventsByDate, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$eventCalendarEventIdByDateJson = json_encode($eventCalendarEventIdByDate, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 ?>
 <?php if (isset($_GET['cleared'])): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
@@ -781,6 +808,139 @@ if ($period === 'today') {
     .clear-date-form .btn {
         white-space: nowrap;
     }
+    .event-calendar-card {
+        border: 1px solid #dfe7f5;
+        border-radius: 12px;
+        background: #f5f6f9;
+        max-width: 440px;
+        width: 100%;
+    }
+    .event-calendar-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 10px;
+        background: #0f3b75;
+        border-radius: 10px;
+        color: #fff;
+        padding: 8px 10px;
+    }
+    .event-calendar-title {
+        font-weight: 700;
+        font-size: 1rem;
+        line-height: 1;
+    }
+    .event-calendar-nav-btn {
+        border: 0;
+        background: transparent;
+        color: #fff;
+        font-size: 0.95rem;
+        line-height: 1;
+        width: 26px;
+        height: 26px;
+        border-radius: 6px;
+    }
+    .event-calendar-nav-btn:hover,
+    .event-calendar-nav-btn:focus {
+        background: rgba(255, 255, 255, 0.2);
+        color: #fff;
+    }
+    .event-calendar-nav-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+        background: transparent;
+    }
+    .event-calendar-head .event-calendar-arrow {
+        font-size: 0.9rem;
+        opacity: 0.9;
+    }
+    .event-calendar-grid {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 4px;
+    }
+    .event-calendar-weekday {
+        text-align: center;
+        font-size: 0.68rem;
+        font-weight: 600;
+        color: #295080;
+        text-transform: uppercase;
+        padding: 2px 0;
+    }
+    .event-calendar-day,
+    .event-calendar-empty {
+        min-height: 42px;
+        border-radius: 7px;
+        border: 1px solid #e8e9ee;
+        background: #f0f1f4;
+        padding: 3px 4px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+    }
+    .event-calendar-empty {
+        background: #f8f9fb;
+        border-style: solid;
+    }
+    .event-calendar-day-num {
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #4c4f56;
+    }
+    .event-calendar-day.has-event {
+        background: #0f3b75;
+        border-color: #0f3b75;
+    }
+    .event-calendar-day.has-event .event-calendar-day-num {
+        color: #fff;
+    }
+    .event-calendar-event-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #0f3b75;
+        margin-top: 3px;
+    }
+    .event-calendar-day.has-event .event-calendar-event-dot {
+        background: #fff;
+    }
+    .event-calendar-day-count {
+        font-size: 0.62rem;
+        font-weight: 700;
+        color: #0f3b75;
+        background: #d7e5ff;
+        border-radius: 999px;
+        padding: 0 5px;
+        line-height: 1.3;
+    }
+    .event-calendar-day.has-event .event-calendar-day-count {
+        color: #0f3b75;
+        background: #fff;
+    }
+    .event-calendar-day.event-clickable {
+        cursor: pointer;
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+    .event-calendar-day.event-clickable:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(15, 59, 117, 0.15);
+    }
+    .event-calendar-meta {
+        margin-top: 7px;
+        font-size: 0.72rem;
+        color: #667085;
+        text-align: center;
+    }
+    .event-calendar-wrap {
+        display: flex;
+        justify-content: flex-end;
+    }
+    .event-calendar-section {
+        width: 100%;
+        max-width: 470px;
+        margin-left: auto;
+    }
     @media (max-width: 768px) {
         .bill-toolbar-right {
             width: 100%;
@@ -793,6 +953,9 @@ if ($period === 'today') {
         .bill-toolbar-right .dropdown,
         .bill-toolbar-right > a {
             width: 100%;
+        }
+        .event-calendar-section {
+            max-width: 100%;
         }
     }
 </style>
@@ -909,6 +1072,120 @@ if ($period === 'today') {
             <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-2"></i>Clear Before Date</button>
         </div>
     </form>
+</div>
+
+<div class="event-calendar-section mt-3">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <h6 class="mb-0"><i class="bi bi-calendar3 me-2"></i>Event Calendar</h6>
+        <small class="text-muted">Monthly view with event dates</small>
+    </div>
+
+    <div class="event-calendar-wrap">
+        <div class="event-calendar-card p-3" id="eventCalendarWidget">
+            <div class="event-calendar-head">
+                <button type="button" class="event-calendar-nav-btn" data-calendar-nav="prev" aria-label="Previous month"><i class="bi bi-caret-left-fill"></i></button>
+                <span class="event-calendar-title" id="eventCalendarTitle"></span>
+                <button type="button" class="event-calendar-nav-btn" data-calendar-nav="next" aria-label="Next month"><i class="bi bi-caret-right-fill"></i></button>
+            </div>
+
+            <div class="event-calendar-grid" id="eventCalendarGrid"></div>
+            <div class="event-calendar-meta" id="eventCalendarMeta">0 event(s) in this month</div>
+        </div>
+    </div>
+    <script>
+                (function () {
+                    var widget = document.getElementById('eventCalendarWidget');
+                    if (!widget) {
+                        return;
+                    }
+
+                    var grid = document.getElementById('eventCalendarGrid');
+                    var title = document.getElementById('eventCalendarTitle');
+                    var meta = document.getElementById('eventCalendarMeta');
+                    var eventsByDate = <?= $eventCalendarEventsByDateJson ?: '{}' ?>;
+                    var eventIdByDate = <?= $eventCalendarEventIdByDateJson ?: '{}' ?>;
+                    var monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+                    var activeDate = new Date();
+                    activeDate.setDate(1);
+
+                    var pad = function (value) {
+                        return String(value).padStart(2, '0');
+                    };
+
+                    var render = function () {
+                        var year = activeDate.getFullYear();
+                        var month = activeDate.getMonth();
+                        var firstWeekday = new Date(year, month, 1).getDay();
+                        var daysInMonth = new Date(year, month + 1, 0).getDate();
+                        var monthTotalEvents = 0;
+                        var html = '';
+
+                        title.textContent = monthNames[month] + ' ' + year;
+
+                        ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(function (weekday) {
+                            html += '<div class="event-calendar-weekday">' + weekday + '</div>';
+                        });
+
+                        for (var i = 0; i < firstWeekday; i++) {
+                            html += '<div class="event-calendar-empty"></div>';
+                        }
+
+                        for (var day = 1; day <= daysInMonth; day++) {
+                            var dateKey = year + '-' + pad(month + 1) + '-' + pad(day);
+                            var eventCount = parseInt(eventsByDate[dateKey] || 0, 10);
+                            var eventId = parseInt(eventIdByDate[dateKey] || 0, 10);
+                            monthTotalEvents += eventCount;
+                            var hasEventClass = eventCount > 0 ? ' has-event event-clickable' : '';
+                            var attrs = '';
+                            if (eventCount > 0 && eventId > 0) {
+                                attrs = ' data-event-id="' + eventId + '" title="Open event"';
+                            }
+
+                            html += '<div class="event-calendar-day' + hasEventClass + '"' + attrs + '>';
+                            html += '<div class="event-calendar-day-num">' + day + '</div>';
+                            if (eventCount > 0) {
+                                html += '<div class="d-flex align-items-center gap-1">';
+                                html += '<span class="event-calendar-event-dot"></span>';
+                                if (eventCount > 1) {
+                                    html += '<span class="event-calendar-day-count">' + eventCount + '</span>';
+                                }
+                                html += '</div>';
+                            }
+                            html += '</div>';
+                        }
+
+                        grid.innerHTML = html;
+                        meta.textContent = monthTotalEvents + ' event(s) in this month';
+                    };
+
+                    widget.addEventListener('click', function (event) {
+                        var eventDay = event.target.closest('.event-calendar-day[data-event-id]');
+                        if (eventDay) {
+                            var eventId = eventDay.getAttribute('data-event-id');
+                            if (eventId) {
+                                window.location.href = '?page=event&action=view&id=' + encodeURIComponent(eventId);
+                                return;
+                            }
+                        }
+
+                        var navButton = event.target.closest('[data-calendar-nav]');
+                        if (!navButton) {
+                            return;
+                        }
+
+                        var direction = navButton.getAttribute('data-calendar-nav');
+                        if (direction === 'prev') {
+                            activeDate.setMonth(activeDate.getMonth() - 1);
+                        } else if (direction === 'next') {
+                            activeDate.setMonth(activeDate.getMonth() + 1);
+                        }
+                        render();
+                    });
+
+                    render();
+                })();
+    </script>
 </div>
 
 <?php elseif ($action === 'create' || $action === 'edit'): ?>

@@ -132,6 +132,7 @@ include 'header.php';
                 <div class="d-grid gap-2">
                     <a href="?page=retail&action=create" class="btn btn-primary"><i class="bi bi-cart-plus me-2"></i>New Retail Bill</a>
                     <a href="?page=event&action=create" class="btn btn-success"><i class="bi bi-calendar-event me-2"></i>New Event Bill</a>
+                    <a href="?page=event#eventCalendarWidget" class="btn btn-outline-success"><i class="bi bi-calendar3 me-2"></i>View Event Calander</a>
                     <a href="?page=products&action=create" class="btn btn-outline-primary"><i class="bi bi-plus-lg me-2"></i>Add Stock Item</a>
                     <button type="button" class="btn btn-outline-secondary" onclick="downloadDashboardPdfReport()"><i class="bi bi-file-earmark-pdf me-2"></i>Generate Dashboard PDF</button>
                 </div>
