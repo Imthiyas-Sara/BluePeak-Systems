@@ -422,7 +422,7 @@ if (!in_array($period, ['today', 'month'], true)) {
     $period = '';
 }
 
-$topSalesCondition = "b.type = 'retail'";
+$topSalesCondition = "b.type = 'retail' AND b.bill_number LIKE '%-R-%'";
 if ($period === 'today') {
     $topSalesCondition .= " AND DATE(b.created_at) = CURRENT_DATE()";
 } elseif ($period === 'month') {
@@ -681,7 +681,7 @@ foreach ($topSellingByRevenue as $item) {
 
 <div class="card mt-3 mb-3" id="topSellingSummaryCard">
     <div class="card-header bg-light d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-stars me-2 text-primary"></i>Top Selling Items Summary</span>
+        <span><i class="bi bi-stars me-2 text-primary"></i>Top Selling Retail Items Summary</span>
         <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#topSellingInsights" aria-expanded="false" aria-controls="topSellingInsights">
             <i class="bi bi-chevron-down me-1"></i>Show Charts
         </button>
