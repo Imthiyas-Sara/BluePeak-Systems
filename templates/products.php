@@ -241,15 +241,16 @@ if (!in_array($stockFilter, ['all', 'active', 'low'], true)) {
                 }
                 foreach ($products as $p):
                 $stockClass = $p['stock_quantity'] <= 0 ? 'bg-danger' : ($p['stock_quantity'] <= $p['min_stock_level'] ? 'bg-warning text-dark' : 'bg-success');
+                $rowStyle = $p['stock_quantity'] <= 0 ? 'background-color: #dc3545 !important; color: white;' : '';
                 ?>
-                <tr>
-                    <td><code><?= htmlspecialchars($p['sku']) ?></code></td>
-                    <td><strong><?= htmlspecialchars($p['name']) ?></strong></td>
-                    <td><?= htmlspecialchars($p['category_name'] ?? 'Uncategorized') ?></td>
-                    <td class="text-end"><?= $currency ?> <?= number_format($p['selling_price'], 2) ?></td>
-                    <td class="text-center"><span class="badge <?= $stockClass ?>"><?= $p['stock_quantity'] ?></span></td>
-                    <td><span class="badge bg-<?= $p['is_active'] ? 'success' : 'secondary' ?>"><?= $p['is_active'] ? 'Active' : 'Inactive' ?></span></td>
-                    <td class="text-end">
+                <tr style="<?= $rowStyle ?>">
+                    <td style="<?= $rowStyle ?>"><code><?= htmlspecialchars($p['sku']) ?></code></td>
+                    <td style="<?= $rowStyle ?>"><strong><?= htmlspecialchars($p['name']) ?></strong><?php if ($p['stock_quantity'] <= 0): ?> <span class="badge bg-danger">❌ OUT OF STOCK</span><?php endif; ?></td>
+                    <td style="<?= $rowStyle ?>"><?= htmlspecialchars($p['category_name'] ?? 'Uncategorized') ?></td>
+                    <td class="text-end" style="<?= $rowStyle ?>"><?= $currency ?> <?= number_format($p['selling_price'], 2) ?></td>
+                    <td class="text-center" style="<?= $rowStyle ?>"><span class="badge <?= $stockClass ?>"><?= $p['stock_quantity'] ?></span></td>
+                    <td style="<?= $rowStyle ?>"><span class="badge bg-<?= $p['is_active'] ? 'success' : 'secondary' ?>"><?= $p['is_active'] ? 'Active' : 'Inactive' ?></span></td>
+                    <td class="text-end" style="<?= $rowStyle ?>">
                         <a href="?page=products&action=edit&id=<?= $p['id'] ?>" class="btn btn-sm btn-primary"><i class="bi bi-pencil"></i></a>
                         <button type="button" class="btn btn-sm btn-danger" onclick="deleteProduct(<?= $p['id'] ?>, '<?= htmlspecialchars($p['name'], ENT_QUOTES) ?>')"><i class="bi bi-trash"></i></button>
                     </td>
@@ -380,6 +381,32 @@ function downloadStockPdfReport() {
     const fileDate = now.toISOString().slice(0, 10);
     doc.save('stock-report-' + type + '-' + fileDate + '.pdf');
 }
+
+function highlightOutOfStockRows() {
+    const rows = document.querySelectorAll('table.table tbody tr');
+    rows.forEach(row => {
+        const stockCell = row.cells[4];
+        if (!stockCell) {
+            return;
+        }
+        const stockValue = stockCell.textContent.trim();
+        if (stockValue === '0') {
+            row.querySelectorAll('td').forEach(td => {
+                td.style.backgroundColor = '#dc3545';
+                td.style.color = 'white';
+            });
+            const itemCell = row.cells[1];
+            if (itemCell && !itemCell.querySelector('.out-of-stock-badge')) {
+                const badge = document.createElement('span');
+                badge.className = 'badge bg-danger out-of-stock-badge ms-2';
+                badge.textContent = '❌ OUT OF STOCK';
+                itemCell.appendChild(badge);
+            }
+        }
+    });
+}
+
+document.addEventListener('DOMContentLoaded', highlightOutOfStockRows);
 </script>
 
 <?php elseif ($action === 'create'): ?>
