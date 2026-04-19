@@ -778,32 +778,6 @@ foreach ($topSellingByRevenue as $item) {
         });
     }
 
-    function tryAutoSubmit() {
-        const mode = getMode();
-
-        if (mode === 'all') {
-            reportForm.submit();
-            return;
-        }
-
-        if (mode === 'date') {
-            const from = reportForm.querySelector('input[name="date_from"]').value;
-            const to = reportForm.querySelector('input[name="date_to"]').value;
-            if (from !== '' && to !== '') {
-                reportForm.submit();
-            }
-            return;
-        }
-
-        if (mode === 'price') {
-            const from = reportForm.querySelector('input[name="price_from"]').value;
-            const to = reportForm.querySelector('input[name="price_to"]').value;
-            if (from !== '' || to !== '') {
-                reportForm.submit();
-            }
-        }
-    }
-
     modeRadios.forEach(radio => {
         radio.addEventListener('change', () => {
             const mode = getMode();
@@ -818,16 +792,7 @@ foreach ($topSellingByRevenue as $item) {
                 });
             }
             setInputState();
-            tryAutoSubmit();
         });
-    });
-
-    dateInputs.forEach(input => {
-        input.addEventListener('change', tryAutoSubmit);
-    });
-
-    priceInputs.forEach(input => {
-        input.addEventListener('change', tryAutoSubmit);
     });
 
     setInputState();
