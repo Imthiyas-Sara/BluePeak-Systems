@@ -287,9 +287,16 @@ try {
         name VARCHAR(150) NOT NULL,
         status ENUM('Pending', 'Confirmed', 'Received') DEFAULT 'Pending',
         order_date DATE,
+        advance_paid DECIMAL(10,2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )");
+
+    try {
+        $pdo->exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS advance_paid DECIMAL(10,2) DEFAULT 0");
+    } catch (Exception $e) {
+        // Keep bootstrapping even if the schema is already in the desired state or the server rejects the migration.
+    }
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS supplier_items (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -392,11 +399,17 @@ try {
 // Load settings
 $settings = [];
 if ($pdo) {
-    $settingsQuery = $pdo->query("SELECT setting_key, setting_value FROM settings");
-    if ($settingsQuery) {
-        while ($row = $settingsQuery->fetch(PDO::FETCH_ASSOC)) {
-            $settings[$row['setting_key']] = $row['setting_value'];
+    try {
+        $settingsQuery = $pdo->query("SELECT setting_key, setting_value FROM settings");
+        if ($settingsQuery) {
+            while ($row = $settingsQuery->fetch(PDO::FETCH_ASSOC)) {
+                $settings[$row['setting_key']] = $row['setting_value'];
+            }
         }
+    } catch (PDOException $e) {
+        // If MySQL drops during bootstrap, fall back to demo mode instead of crashing.
+        $_SESSION['demo_mode'] = true;
+        $pdo = null;
     }
 }
 

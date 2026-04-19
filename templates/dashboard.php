@@ -1,41 +1,61 @@
 ﻿<?php
 $currency = $settings['currency_symbol'] ?? 'LKR';
 
-// Get today's stats
-$today = date('Y-m-d');
-$todayBills = $pdo->query("SELECT 
-    SUM(CASE WHEN type = 'retail' THEN 1 ELSE 0 END) as retail_count,
-    SUM(CASE WHEN type IN ('wholesale', 'event') THEN 1 ELSE 0 END) as event_count,
-    COALESCE(SUM(CASE WHEN type = 'retail' THEN total_amount ELSE 0 END), 0) as retail_total,
-    COALESCE(SUM(CASE WHEN type IN ('wholesale', 'event') THEN total_amount ELSE 0 END), 0) as event_total,
-    SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN 1 ELSE 0 END) as count,
-    COALESCE(SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN total_amount ELSE 0 END), 0) as total
-    FROM bills 
-    WHERE DATE(created_at) = '$today'")->fetch();
-$monthBills = $pdo->query("SELECT 
-    SUM(CASE WHEN type = 'retail' THEN 1 ELSE 0 END) as retail_count,
-    SUM(CASE WHEN type IN ('wholesale', 'event') THEN 1 ELSE 0 END) as event_count,
-    COALESCE(SUM(CASE WHEN type = 'retail' THEN total_amount ELSE 0 END), 0) as retail_total,
-    COALESCE(SUM(CASE WHEN type IN ('wholesale', 'event') THEN total_amount ELSE 0 END), 0) as event_total,
-    SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN 1 ELSE 0 END) as count,
-    COALESCE(SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN total_amount ELSE 0 END), 0) as total
-    FROM bills 
-    WHERE MONTH(created_at) = MONTH(CURRENT_DATE()) AND YEAR(created_at) = YEAR(CURRENT_DATE())")->fetch();
-$totalProducts = $pdo->query("SELECT COUNT(*) FROM products WHERE is_active = 1")->fetchColumn();
-$lowStock = $pdo->query("SELECT COUNT(*) FROM products WHERE stock_quantity <= min_stock_level AND is_active = 1")->fetchColumn();
+$todayBills = ['retail_count' => 0, 'event_count' => 0, 'retail_total' => 0, 'event_total' => 0, 'count' => 0, 'total' => 0];
+$monthBills = ['retail_count' => 0, 'event_count' => 0, 'retail_total' => 0, 'event_total' => 0, 'count' => 0, 'total' => 0];
+$totalProducts = 0;
+$lowStock = 0;
+$recentBills = [];
+$lowStockItems = [];
 
-if (!is_array($todayBills)) {
-    $todayBills = ['count' => 0, 'total' => 0, 'retail_count' => 0, 'event_count' => 0, 'retail_total' => 0, 'event_total' => 0];
-}
-if (!is_array($monthBills)) {
-    $monthBills = ['count' => 0, 'total' => 0, 'retail_count' => 0, 'event_count' => 0, 'retail_total' => 0, 'event_total' => 0];
-}
-$totalProducts = (int) ($totalProducts ?: 0);
-$lowStock = (int) ($lowStock ?: 0);
+if ($pdo) {
+    try {
+        // Get today's stats
+        $today = date('Y-m-d');
+        $todayBillsStmt = $pdo->query("SELECT 
+            SUM(CASE WHEN type = 'retail' THEN 1 ELSE 0 END) as retail_count,
+            SUM(CASE WHEN type IN ('wholesale', 'event') THEN 1 ELSE 0 END) as event_count,
+            COALESCE(SUM(CASE WHEN type = 'retail' THEN total_amount ELSE 0 END), 0) as retail_total,
+            COALESCE(SUM(CASE WHEN type IN ('wholesale', 'event') THEN total_amount ELSE 0 END), 0) as event_total,
+            SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN 1 ELSE 0 END) as count,
+            COALESCE(SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN total_amount ELSE 0 END), 0) as total
+            FROM bills 
+            WHERE DATE(created_at) = '$today'");
+        if ($todayBillsStmt) {
+            $todayBills = $todayBillsStmt->fetch(PDO::FETCH_ASSOC) ?: $todayBills;
+        }
 
-// Recent bills
-$recentBills = $pdo->query("SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id ORDER BY b.created_at DESC LIMIT 5")->fetchAll();
-$lowStockItems = $pdo->query("SELECT sku, name, stock_quantity, min_stock_level FROM products WHERE is_active = 1 AND stock_quantity <= min_stock_level ORDER BY stock_quantity ASC, name ASC LIMIT 100")->fetchAll();
+        $monthBillsStmt = $pdo->query("SELECT 
+            SUM(CASE WHEN type = 'retail' THEN 1 ELSE 0 END) as retail_count,
+            SUM(CASE WHEN type IN ('wholesale', 'event') THEN 1 ELSE 0 END) as event_count,
+            COALESCE(SUM(CASE WHEN type = 'retail' THEN total_amount ELSE 0 END), 0) as retail_total,
+            COALESCE(SUM(CASE WHEN type IN ('wholesale', 'event') THEN total_amount ELSE 0 END), 0) as event_total,
+            SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN 1 ELSE 0 END) as count,
+            COALESCE(SUM(CASE WHEN type IN ('retail', 'wholesale', 'event') THEN total_amount ELSE 0 END), 0) as total
+            FROM bills 
+            WHERE MONTH(created_at) = MONTH(CURRENT_DATE()) AND YEAR(created_at) = YEAR(CURRENT_DATE())");
+        if ($monthBillsStmt) {
+            $monthBills = $monthBillsStmt->fetch(PDO::FETCH_ASSOC) ?: $monthBills;
+        }
+
+        $totalProducts = (int) ($pdo->query("SELECT COUNT(*) FROM products WHERE is_active = 1")->fetchColumn() ?: 0);
+        $lowStock = (int) ($pdo->query("SELECT COUNT(*) FROM products WHERE stock_quantity <= min_stock_level AND is_active = 1")->fetchColumn() ?: 0);
+
+        // Recent bills
+        $recentBillsStmt = $pdo->query("SELECT b.*, c.name as customer_name FROM bills b LEFT JOIN customers c ON b.customer_id = c.id ORDER BY b.created_at DESC LIMIT 5");
+        if ($recentBillsStmt) {
+            $recentBills = $recentBillsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        }
+
+        $lowStockItemsStmt = $pdo->query("SELECT sku, name, stock_quantity, min_stock_level FROM products WHERE is_active = 1 AND stock_quantity <= min_stock_level ORDER BY stock_quantity ASC, name ASC LIMIT 100");
+        if ($lowStockItemsStmt) {
+            $lowStockItems = $lowStockItemsStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        }
+    } catch (PDOException $e) {
+        $_SESSION['demo_mode'] = true;
+        $pdo = null;
+    }
+}
 
 include 'header.php';
 ?>
