@@ -333,6 +333,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_POST = array_merge($_POST, $data);
         }
     }
+
+    // Ensure performance/increment schema exists before handling POST actions.
+    try {
+        $pdo->exec("ALTER TABLE employees ADD COLUMN base_salary DECIMAL(10,2) NOT NULL DEFAULT 0");
+    } catch (Exception $e) {
+        // Column already exists
+    }
+    try {
+        $pdo->exec("ALTER TABLE employees ADD COLUMN current_salary DECIMAL(10,2) NOT NULL DEFAULT 0");
+    } catch (Exception $e) {
+        // Column already exists
+    }
+    try {
+        $pdo->exec("ALTER TABLE employees ADD COLUMN last_increment_year INT NULL DEFAULT NULL");
+    } catch (Exception $e) {
+        // Column already exists
+    }
+    try {
+        $pdo->exec("ALTER TABLE employees ADD COLUMN total_stars INT NOT NULL DEFAULT 0");
+    } catch (Exception $e) {
+        // Column already exists
+    }
+    try {
+        $pdo->exec("ALTER TABLE employees ADD COLUMN is_top_performer TINYINT(1) NOT NULL DEFAULT 0");
+    } catch (Exception $e) {
+        // Column already exists
+    }
+    try {
+        $pdo->exec("ALTER TABLE employees ADD COLUMN increment_approved TINYINT(1) NOT NULL DEFAULT 0");
+    } catch (Exception $e) {
+        // Column already exists
+    }
+
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS employee_monthly_performance (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            employee_id INT NOT NULL,
+            month TINYINT NOT NULL,
+            year SMALLINT NOT NULL,
+            stars TINYINT NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY unique_employee_month_year (employee_id, month, year),
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )");
+    } catch (Exception $e) {
+        // Keep workflow unchanged if table creation fails.
+    }
+
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS employee_yearly_performance (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            employee_id INT NOT NULL,
+            year SMALLINT NOT NULL,
+            total_stars INT NOT NULL DEFAULT 0,
+            is_eligible TINYINT(1) NOT NULL DEFAULT 0,
+            is_top_performer TINYINT(1) NOT NULL DEFAULT 0,
+            increment_approved TINYINT(1) NOT NULL DEFAULT 0,
+            increment_applied_at TIMESTAMP NULL DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY unique_employee_year (employee_id, year),
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )");
+    } catch (Exception $e) {
+        // Keep workflow unchanged if table creation fails.
+    }
+    try {
+        $pdo->exec("ALTER TABLE employee_yearly_performance ADD COLUMN increment_applied_at TIMESTAMP NULL DEFAULT NULL");
+    } catch (Exception $e) {
+        // Column already exists or table not available yet.
+    }
     
     if (isset($_POST['action'])) {
         $jsonActions = [
@@ -344,6 +416,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'set_payment_status',
             'update_single_attendance',
             'load_attendance',
+            'load_attendance_summary',
+            'update_employee_by_uid',
+            'load_monthly_performance',
+            'save_monthly_performance',
+            'calculate_yearly_performance',
+            'load_yearly_performance',
+            'approve_yearly_increment',
         ];
 
         if (in_array($_POST['action'], $jsonActions, true)) {
@@ -354,7 +433,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // ----------------------------------------
         // Add / Edit Employee
         // ----------------------------------------
-        if ($_POST['action'] === 'add' || $_POST['action'] === 'edit') {
+        if ($_POST['action'] === 'update_employee_by_uid') {
+            $selectedUid = trim((string)($_POST['selected_uid'] ?? ''));
+            $name = trim((string)($_POST['name'] ?? ''));
+            $address = trim((string)($_POST['address'] ?? ''));
+            $employee_type = trim((string)($_POST['employee_type'] ?? ''));
+            $phone = trim((string)($_POST['phone'] ?? ''));
+            $daily_wage = $_POST['daily_wage'] ?? 0;
+            $monthly_salary = $_POST['monthly_salary'] ?? 0;
+
+            $typeRaw = strtolower($employee_type);
+            if (strpos($typeRaw, 'month') !== false) {
+                $employee_type = 'monthly_paid';
+            } elseif (strpos($typeRaw, 'day') !== false) {
+                $employee_type = 'daily_paid';
+            }
+
+            $daily_wage = is_numeric($daily_wage) ? (float)$daily_wage : 0;
+            $monthly_salary = is_numeric($monthly_salary) ? (float)$monthly_salary : 0;
+
+            if (
+                $selectedUid === '' ||
+                $name === '' ||
+                $phone === '' ||
+                $address === '' ||
+                !in_array($employee_type, ['daily_paid', 'monthly_paid'], true) ||
+                ($employee_type === 'daily_paid' && $daily_wage <= 0) ||
+                ($employee_type === 'monthly_paid' && $monthly_salary <= 0)
+            ) {
+                echo json_encode(['success' => false, 'message' => 'Please fill all required fields']);
+                exit;
+            }
+
+            if (!preg_match('/^[A-Za-z ]+$/', $name)) {
+                echo json_encode(['success' => false, 'message' => 'Name is required and must contain only letters and spaces.']);
+                exit;
+            }
+
+            if (!preg_match('/^\d{10}$/', $phone)) {
+                echo json_encode(['success' => false, 'message' => 'Phone Number is required and must be exactly 10 digits.']);
+                exit;
+            }
+
+            try {
+                $pdo->beginTransaction();
+
+                // Debug: print UID before executing update query
+                error_log('Edit Employee UID before query: ' . $selectedUid);
+
+                $effectiveCurrentSalary = $employee_type === 'monthly_paid' ? (float)$monthly_salary : (float)$daily_wage;
+                $stmt = $pdo->prepare("UPDATE employees SET name = ?, address = ?, employee_type = ?, phone = ?, daily_wage = ?, monthly_salary = ?, current_salary = ? WHERE uid = ? LIMIT 1");
+                $stmt->execute([$name, $address, $employee_type, $phone, $daily_wage, $monthly_salary, $effectiveCurrentSalary, $selectedUid]);
+
+                if ($stmt->rowCount() < 1) {
+                    $existsStmt = $pdo->prepare("SELECT id FROM employees WHERE uid = ? LIMIT 1");
+                    $existsStmt->execute([$selectedUid]);
+                    if (!$existsStmt->fetch(PDO::FETCH_ASSOC)) {
+                        $pdo->rollBack();
+                        echo json_encode(['success' => false, 'message' => 'Employee not found for selected UID']);
+                        exit;
+                    }
+                }
+
+                $pdo->commit();
+
+                // Debug: print success message after update
+                error_log('Employee update succeeded for UID: ' . $selectedUid);
+                echo json_encode(['success' => true, 'message' => 'Employee updated successfully!', 'uid' => $selectedUid]);
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                echo json_encode(['success' => false, 'message' => 'Error updating employee: ' . $e->getMessage()]);
+            }
+            exit;
+        } elseif ($_POST['action'] === 'add' || $_POST['action'] === 'edit') {
             // Add or Edit Employee
             $uid = $_POST['uid'] ?? '';
             $name = trim((string)($_POST['name'] ?? ''));
@@ -434,8 +587,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     if (!$error) {
-                        $stmt = $pdo->prepare("UPDATE employees SET name = ?, address = ?, employee_type = ?, phone = ?, daily_wage = ?, monthly_salary = ? WHERE id = ?");
-                        $stmt->execute([$name, $address, $employee_type, $phone, $daily_wage, $monthly_salary, $employee_id]);
+                        $effectiveCurrentSalary = $employee_type === 'monthly_paid' ? (float)$monthly_salary : (float)$daily_wage;
+                        $stmt = $pdo->prepare("UPDATE employees SET name = ?, address = ?, employee_type = ?, phone = ?, daily_wage = ?, monthly_salary = ?, current_salary = ? WHERE id = ?");
+                        $stmt->execute([$name, $address, $employee_type, $phone, $daily_wage, $monthly_salary, $effectiveCurrentSalary, $employee_id]);
                         $_SESSION['flash_success'] = "Employee updated successfully!";
                     }
                 }
@@ -788,8 +942,88 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     return (int)($row['is_active'] ?? 1) === 0;
                 }));
 
-                $salaryDataBlock = $buildMonthlySalaryData($month, true);
-                $salaryData = $salaryDataBlock['salaryData'];
+                $year = (int)substr($month, 0, 4);
+                $monthPattern = $month . '-%';
+
+                $presentDaysStmt = $pdo->prepare("SELECT employee_id, COUNT(*) as present_days
+                                                 FROM attendance
+                                                 WHERE status = 'present' AND attendance_date LIKE ?
+                                                 GROUP BY employee_id");
+                $presentDaysStmt->execute([$monthPattern]);
+                $presentDaysMap = [];
+                foreach ($presentDaysStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $presentDaysMap[(int)$row['employee_id']] = (int)$row['present_days'];
+                }
+
+                $paymentStmt = $pdo->prepare("SELECT employee_id, status FROM salary_payments WHERE month = ?");
+                $paymentStmt->execute([$month]);
+                $paymentStatusMap = $paymentStmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
+                $eligibleApprovedMap = [];
+                try {
+                    $eligibilityStmt = $pdo->prepare("SELECT employee_id
+                                                     FROM employee_yearly_performance
+                                                     WHERE year = ? AND is_eligible = 1 AND increment_approved = 1");
+                    $eligibilityStmt->execute([$year]);
+                    foreach ($eligibilityStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                        $eligibleApprovedMap[(int)$row['employee_id']] = true;
+                    }
+                } catch (Exception $e) {
+                    // Keep report generation resilient if yearly performance table is unavailable.
+                }
+
+                $normalizeType = function ($employee) {
+                    $rawType = strtolower(trim((string)($employee['employee_type'] ?? '')));
+                    if ($rawType === '') {
+                        if ((float)($employee['monthly_salary'] ?? 0) > 0) {
+                            return 'monthly_paid';
+                        }
+                        return 'daily_paid';
+                    }
+                    if (strpos($rawType, 'month') !== false) {
+                        return 'monthly_paid';
+                    }
+                    if (strpos($rawType, 'day') !== false) {
+                        return 'daily_paid';
+                    }
+                    return $rawType === 'monthly_paid' ? 'monthly_paid' : 'daily_paid';
+                };
+
+                $salaryData = [];
+                foreach ($activeEmployees as $employee) {
+                    $employeeId = (int)($employee['id'] ?? 0);
+                    $type = $normalizeType($employee);
+                    $presentDays = (int)($presentDaysMap[$employeeId] ?? 0);
+
+                    if ($type === 'daily_paid') {
+                        $dailyWage = (float)($employee['daily_wage'] ?? 0);
+                        $baseSalary = $dailyWage * $presentDays;
+                    } else {
+                        $currentSalary = (float)($employee['current_salary'] ?? 0);
+                        if ($currentSalary <= 0) {
+                            $currentSalary = (float)($employee['monthly_salary'] ?? 0);
+                        }
+                        $baseSalary = $currentSalary;
+                    }
+
+                    $isEligibleApproved = !empty($eligibleApprovedMap[$employeeId]);
+                    $bonusAmount = $isEligibleApproved ? ($baseSalary * 0.05) : 0.0;
+                    $finalSalary = $baseSalary + $bonusAmount;
+
+                    $salaryData[] = [
+                        'id' => $employeeId,
+                        'uid' => $employee['uid'] ?? 'N/A',
+                        'name' => $employee['name'] ?? 'N/A',
+                        'address' => $employee['address'] ?? 'N/A',
+                        'phone' => $employee['phone'] ?? 'N/A',
+                        'type' => $type,
+                        'present_days' => $presentDays,
+                        'base_salary' => number_format($baseSalary, 2, '.', ''),
+                        'bonus_amount' => number_format($bonusAmount, 2, '.', ''),
+                        'final_salary_with_bonus' => number_format($finalSalary, 2, '.', ''),
+                        'payment_status' => $paymentStatusMap[$employeeId] ?? 'pending',
+                    ];
+                }
 
                 $monthStart = $month . '-01';
                 $monthEnd = date('Y-m-t', strtotime($monthStart));
@@ -1022,6 +1256,309 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => false, 'message' => 'Error loading attendance: ' . $e->getMessage()]);
             }
             exit;
+        // ----------------------------------------
+        // Attendance Summary (Present Days)
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'load_attendance_summary') {
+            $month = (int)($_POST['month'] ?? 0);
+            $year = (int)($_POST['year'] ?? 0);
+
+            if ($month < 1 || $month > 12 || $year < 2000 || $year > 2100) {
+                echo json_encode(['success' => false, 'message' => 'Invalid month or year']);
+                exit;
+            }
+
+            try {
+                $stmt = $pdo->prepare("SELECT a.employee_id, e.name as employee_name, COUNT(*) as total_present_days
+                                      FROM attendance a
+                                      INNER JOIN employees e ON e.id = a.employee_id
+                                      WHERE a.status = 'present'
+                                      AND MONTH(a.attendance_date) = ?
+                                      AND YEAR(a.attendance_date) = ?
+                                      GROUP BY a.employee_id, e.name
+                                      ORDER BY a.employee_id ASC");
+                $stmt->execute([$month, $year]);
+                $summary = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                echo json_encode(['success' => true, 'summary' => $summary]);
+            } catch (Exception $e) {
+                echo json_encode(['success' => false, 'message' => 'Error loading attendance summary: ' . $e->getMessage()]);
+            }
+            exit;
+        // ----------------------------------------
+        // Monthly Performance Input Loader
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'load_monthly_performance') {
+            $month = (int)($_POST['month'] ?? 0);
+            $year = (int)($_POST['year'] ?? 0);
+
+            if ($month < 1 || $month > 12 || $year < 2000 || $year > 2100) {
+                echo json_encode(['success' => false, 'message' => 'Invalid month or year']);
+                exit;
+            }
+
+            try {
+                $stmt = $pdo->prepare("SELECT e.id as employee_id, e.uid, e.name, COALESCE(p.stars, 0) as stars
+                                      FROM employees e
+                                      LEFT JOIN employee_monthly_performance p
+                                        ON p.employee_id = e.id AND p.month = ? AND p.year = ?
+                                      WHERE e.is_active = 1
+                                      ORDER BY e.id ASC");
+                $stmt->execute([$month, $year]);
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                echo json_encode(['success' => true, 'employees' => $rows]);
+            } catch (Exception $e) {
+                echo json_encode(['success' => false, 'message' => 'Error loading monthly performance: ' . $e->getMessage()]);
+            }
+            exit;
+        // ----------------------------------------
+        // Monthly Performance Save
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'save_monthly_performance') {
+            $month = (int)($_POST['month'] ?? 0);
+            $year = (int)($_POST['year'] ?? 0);
+            $ratings = $_POST['ratings'] ?? [];
+
+            if ($month < 1 || $month > 12 || $year < 2000 || $year > 2100 || !is_array($ratings)) {
+                echo json_encode(['success' => false, 'message' => 'Invalid request']);
+                exit;
+            }
+
+            try {
+                $pdo->beginTransaction();
+                $stmt = $pdo->prepare("INSERT INTO employee_monthly_performance (employee_id, month, year, stars)
+                                      VALUES (?, ?, ?, ?)
+                                      ON DUPLICATE KEY UPDATE stars = VALUES(stars)");
+
+                foreach ($ratings as $row) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+
+                    $employeeId = (int)($row['employee_id'] ?? 0);
+                    $stars = (int)($row['stars'] ?? -1);
+                    if ($employeeId <= 0 || $stars < 0 || $stars > 5) {
+                        throw new Exception('Invalid performance data');
+                    }
+
+                    $stmt->execute([$employeeId, $month, $year, $stars]);
+                }
+
+                $pdo->commit();
+                echo json_encode(['success' => true, 'message' => 'Monthly performance saved successfully']);
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                echo json_encode(['success' => false, 'message' => 'Error saving monthly performance: ' . $e->getMessage()]);
+            }
+            exit;
+        // ----------------------------------------
+        // Yearly Performance Calculation
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'calculate_yearly_performance') {
+            $year = (int)($_POST['year'] ?? 0);
+            if ($year < 2000 || $year > 2100) {
+                echo json_encode(['success' => false, 'message' => 'Invalid year']);
+                exit;
+            }
+
+            try {
+                $pdo->beginTransaction();
+
+                $stmt = $pdo->prepare("SELECT employee_id, SUM(stars) as total_stars
+                                      FROM employee_monthly_performance
+                                      WHERE year = ?
+                                      GROUP BY employee_id");
+                $stmt->execute([$year]);
+                $totalByEmployee = [];
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $totalByEmployee[(int)$row['employee_id']] = (int)$row['total_stars'];
+                }
+
+                $stmt = $pdo->prepare("SELECT employee_id, increment_approved
+                                      FROM employee_yearly_performance
+                                      WHERE year = ?");
+                $stmt->execute([$year]);
+                $approvalMap = [];
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $approvalMap[(int)$row['employee_id']] = [
+                        'increment_approved' => (int)($row['increment_approved'] ?? 0),
+                    ];
+                }
+
+                $stmt = $pdo->query("SELECT id, uid, name FROM employees WHERE is_active = 1 ORDER BY id ASC");
+                $employeesForYear = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                $eligible = [];
+                foreach ($employeesForYear as $emp) {
+                    $employeeId = (int)$emp['id'];
+                    $totalStars = (int)($totalByEmployee[$employeeId] ?? 0);
+                    if ($totalStars >= 50) {
+                        $eligible[] = ['employee_id' => $employeeId, 'total_stars' => $totalStars];
+                    }
+                }
+
+                usort($eligible, function ($a, $b) {
+                    if ($a['total_stars'] === $b['total_stars']) {
+                        return $a['employee_id'] <=> $b['employee_id'];
+                    }
+                    return $b['total_stars'] <=> $a['total_stars'];
+                });
+
+                $topPerformerId = !empty($eligible) ? (int)$eligible[0]['employee_id'] : 0;
+
+                $upsertYearly = $pdo->prepare("INSERT INTO employee_yearly_performance
+                    (employee_id, year, total_stars, is_eligible, is_top_performer, increment_approved, increment_applied_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        total_stars = VALUES(total_stars),
+                        is_eligible = VALUES(is_eligible),
+                        is_top_performer = VALUES(is_top_performer),
+                        increment_approved = VALUES(increment_approved),
+                        increment_applied_at = VALUES(increment_applied_at)");
+
+                $updateEmployee = $pdo->prepare("UPDATE employees SET total_stars = ?, is_top_performer = ?, increment_approved = ? WHERE id = ?");
+
+                foreach ($employeesForYear as $emp) {
+                    $employeeId = (int)$emp['id'];
+                    $totalStars = (int)($totalByEmployee[$employeeId] ?? 0);
+                    $isEligible = $totalStars >= 50 ? 1 : 0;
+                    $isTop = $topPerformerId === $employeeId ? 1 : 0;
+                    $approved = (int)($approvalMap[$employeeId]['increment_approved'] ?? 0);
+
+                    $upsertYearly->execute([$employeeId, $year, $totalStars, $isEligible, $isTop, $approved, null]);
+                    $updateEmployee->execute([$totalStars, $isTop, $approved, $employeeId]);
+                }
+
+                $pdo->commit();
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Yearly performance calculated successfully',
+                    'top_performer_id' => $topPerformerId,
+                ]);
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                echo json_encode(['success' => false, 'message' => 'Error calculating yearly performance: ' . $e->getMessage()]);
+            }
+            exit;
+        // ----------------------------------------
+        // Yearly Performance Summary Loader
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'load_yearly_performance') {
+            $year = (int)($_POST['year'] ?? 0);
+            if ($year < 2000 || $year > 2100) {
+                echo json_encode(['success' => false, 'message' => 'Invalid year']);
+                exit;
+            }
+
+            try {
+                $stmt = $pdo->prepare("SELECT e.id as employee_id, e.uid, e.name,
+                                      COALESCE(y.total_stars, 0) as total_stars,
+                                      COALESCE(y.is_eligible, 0) as is_eligible,
+                                      COALESCE(y.is_top_performer, 0) as is_top_performer,
+                                      COALESCE(y.increment_approved, 0) as increment_approved
+                                      FROM employees e
+                                      LEFT JOIN employee_yearly_performance y
+                                        ON y.employee_id = e.id AND y.year = ?
+                                      WHERE e.is_active = 1
+                                      ORDER BY COALESCE(y.total_stars, 0) DESC, e.id ASC");
+                $stmt->execute([$year]);
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                echo json_encode(['success' => true, 'summary' => $rows]);
+            } catch (Exception $e) {
+                echo json_encode(['success' => false, 'message' => 'Error loading yearly performance: ' . $e->getMessage()]);
+            }
+            exit;
+        // ----------------------------------------
+        // Approve Yearly Increment
+        // ----------------------------------------
+        } elseif ($_POST['action'] === 'approve_yearly_increment') {
+            $year = (int)($_POST['year'] ?? 0);
+            if ($year < 2000 || $year > 2100) {
+                echo json_encode(['success' => false, 'message' => 'Invalid year']);
+                exit;
+            }
+
+            try {
+                $pdo->beginTransaction();
+
+                $stmt = $pdo->prepare("SELECT y.employee_id, y.total_stars, e.employee_type, e.daily_wage, e.monthly_salary, e.current_salary,
+                                      e.uid, e.name, e.is_top_performer, e.increment_approved, e.last_increment_year
+                                      FROM employee_yearly_performance y
+                                      INNER JOIN employees e ON e.id = y.employee_id
+                                      WHERE y.year = ? AND y.is_top_performer = 1 AND y.total_stars >= 50
+                                      LIMIT 1");
+                $stmt->execute([$year]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+                if (!$row) {
+                    $pdo->rollBack();
+                    echo json_encode(['success' => false, 'message' => 'No eligible top performer found for selected year']);
+                    exit;
+                }
+
+                $employeeId = (int)$row['employee_id'];
+                $type = strtolower(trim((string)($row['employee_type'] ?? '')));
+                $lastIncrementYear = isset($row['last_increment_year']) && $row['last_increment_year'] !== null ? (int)$row['last_increment_year'] : 0;
+
+                if ((int)($row['is_top_performer'] ?? 0) !== 1) {
+                    $pdo->rollBack();
+                    echo json_encode(['success' => false, 'message' => 'Selected employee is not marked as top performer']);
+                    exit;
+                }
+
+                $markApproved = $pdo->prepare("UPDATE employees SET increment_approved = 1 WHERE id = ?");
+                $markApproved->execute([$employeeId]);
+
+                if ($lastIncrementYear === $year) {
+                    $stmt = $pdo->prepare("UPDATE employee_yearly_performance
+                                          SET increment_approved = 1
+                                          WHERE employee_id = ? AND year = ?");
+                    $stmt->execute([$employeeId, $year]);
+                    $pdo->commit();
+                    echo json_encode(['success' => true, 'message' => 'Increment already applied for this year']);
+                    exit;
+                }
+
+                $currentSalary = (float)($row['current_salary'] ?? 0);
+                if ($currentSalary <= 0) {
+                    $currentSalary = (strpos($type, 'month') !== false || (float)($row['monthly_salary'] ?? 0) > 0)
+                        ? (float)($row['monthly_salary'] ?? 0)
+                        : (float)($row['daily_wage'] ?? 0);
+                }
+
+                $newSalary = $currentSalary * 1.05;
+
+                if (strpos($type, 'month') !== false || (float)($row['monthly_salary'] ?? 0) > 0) {
+                    $upd = $pdo->prepare("UPDATE employees SET monthly_salary = ?, current_salary = ?, increment_approved = 1, last_increment_year = ? WHERE id = ?");
+                    $upd->execute([$newSalary, $newSalary, $year, $employeeId]);
+                } else {
+                    $upd = $pdo->prepare("UPDATE employees SET daily_wage = ?, current_salary = ?, increment_approved = 1, last_increment_year = ? WHERE id = ?");
+                    $upd->execute([$newSalary, $newSalary, $year, $employeeId]);
+                }
+
+                $stmt = $pdo->prepare("UPDATE employee_yearly_performance
+                                      SET increment_approved = 1
+                                      WHERE employee_id = ? AND year = ?");
+                $stmt->execute([$employeeId, $year]);
+
+                $pdo->commit();
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Increment approved and applied (5%) for ' . ($row['name'] ?? 'employee') . ' [' . ($row['uid'] ?? 'N/A') . ']'
+                ]);
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                echo json_encode(['success' => false, 'message' => 'Error approving increment: ' . $e->getMessage()]);
+            }
+            exit;
         }
     }
 }
@@ -1058,6 +1595,83 @@ try {
     $pdo->exec("ALTER TABLE employees ADD COLUMN monthly_salary DECIMAL(10,2) DEFAULT 0");
 } catch (Exception $e) {
     // Column already exists
+}
+
+try {
+    $pdo->exec("ALTER TABLE employees ADD COLUMN total_stars INT NOT NULL DEFAULT 0");
+} catch (Exception $e) {
+    // Column already exists
+}
+
+try {
+    $pdo->exec("ALTER TABLE employees ADD COLUMN is_top_performer TINYINT(1) NOT NULL DEFAULT 0");
+} catch (Exception $e) {
+    // Column already exists
+}
+
+try {
+    $pdo->exec("ALTER TABLE employees ADD COLUMN increment_approved TINYINT(1) NOT NULL DEFAULT 0");
+} catch (Exception $e) {
+    // Column already exists
+}
+
+try {
+    $pdo->exec("ALTER TABLE employees ADD COLUMN base_salary DECIMAL(10,2) NOT NULL DEFAULT 0");
+} catch (Exception $e) {
+    // Column already exists
+}
+
+try {
+    $pdo->exec("ALTER TABLE employees ADD COLUMN current_salary DECIMAL(10,2) NOT NULL DEFAULT 0");
+} catch (Exception $e) {
+    // Column already exists
+}
+
+try {
+    $pdo->exec("ALTER TABLE employees ADD COLUMN last_increment_year INT NULL DEFAULT NULL");
+} catch (Exception $e) {
+    // Column already exists
+}
+
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS employee_monthly_performance (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        employee_id INT NOT NULL,
+        month TINYINT NOT NULL,
+        year SMALLINT NOT NULL,
+        stars TINYINT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_employee_month_year (employee_id, month, year),
+        FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+    )");
+} catch (Exception $e) {
+    // Keep workflow unchanged if table creation fails.
+}
+
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS employee_yearly_performance (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        employee_id INT NOT NULL,
+        year SMALLINT NOT NULL,
+        total_stars INT NOT NULL DEFAULT 0,
+        is_eligible TINYINT(1) NOT NULL DEFAULT 0,
+        is_top_performer TINYINT(1) NOT NULL DEFAULT 0,
+        increment_approved TINYINT(1) NOT NULL DEFAULT 0,
+        increment_applied_at TIMESTAMP NULL DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_employee_year (employee_id, year),
+        FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+    )");
+} catch (Exception $e) {
+    // Keep workflow unchanged if table creation fails.
+}
+
+try {
+    $pdo->exec("ALTER TABLE employee_yearly_performance ADD COLUMN increment_applied_at TIMESTAMP NULL DEFAULT NULL");
+} catch (Exception $e) {
+    // Column already exists or table not available yet.
 }
 
 // Normalize employee_type values and ensure default
@@ -1102,6 +1716,25 @@ foreach ($employees as &$employee) {
         $stmt = $pdo->prepare("UPDATE employees SET monthly_salary = ? WHERE id = ?");
         $stmt->execute([$employee['monthly_salary'], $employee['id']]);
     }
+
+    $effectiveSalary = ($typeKey === 'monthly_paid')
+        ? (float)($employee['monthly_salary'] ?? 0)
+        : (float)($employee['daily_wage'] ?? 0);
+    $baseSalary = (float)($employee['base_salary'] ?? 0);
+    $currentSalary = (float)($employee['current_salary'] ?? 0);
+
+    if ($baseSalary <= 0) {
+        $baseSalary = $effectiveSalary;
+    }
+    if ($currentSalary <= 0) {
+        $currentSalary = $effectiveSalary;
+    }
+
+    $employee['base_salary'] = $baseSalary;
+    $employee['current_salary'] = $currentSalary;
+
+    $syncStmt = $pdo->prepare("UPDATE employees SET base_salary = ?, current_salary = ? WHERE id = ?");
+    $syncStmt->execute([$baseSalary, $currentSalary, $employee['id']]);
 }
 unset($employee);
 
@@ -1118,6 +1751,25 @@ foreach ($pastEmployees as &$employee) {
         $stmt = $pdo->prepare("UPDATE employees SET monthly_salary = ? WHERE id = ?");
         $stmt->execute([$employee['monthly_salary'], $employee['id']]);
     }
+
+    $effectiveSalary = ($typeKey === 'monthly_paid')
+        ? (float)($employee['monthly_salary'] ?? 0)
+        : (float)($employee['daily_wage'] ?? 0);
+    $baseSalary = (float)($employee['base_salary'] ?? 0);
+    $currentSalary = (float)($employee['current_salary'] ?? 0);
+
+    if ($baseSalary <= 0) {
+        $baseSalary = $effectiveSalary;
+    }
+    if ($currentSalary <= 0) {
+        $currentSalary = $effectiveSalary;
+    }
+
+    $employee['base_salary'] = $baseSalary;
+    $employee['current_salary'] = $currentSalary;
+
+    $syncStmt = $pdo->prepare("UPDATE employees SET base_salary = ?, current_salary = ? WHERE id = ?");
+    $syncStmt->execute([$baseSalary, $currentSalary, $employee['id']]);
 }
 unset($employee);
 
@@ -1158,32 +1810,74 @@ if ($editEmployeeId) {
     z-index: 1020;
     background: #fff;
     border-bottom: 1px solid #e9ecef;
-    padding-top: 0.5rem;
-    padding-bottom: 0.5rem;
+    padding: 0.5rem 0.25rem;
+}
+
+.employee-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.employee-toolbar-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 0;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.employee-toolbar-actions {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0.5rem;
+    justify-content: center;
+    align-items: center;
+    overflow-x: auto;
+    padding-bottom: 0.15rem;
+    scrollbar-width: thin;
+}
+
+.employee-toolbar-actions .btn {
+    white-space: nowrap;
+    margin: 0;
+}
+
+@media (max-width: 992px) {
+    .employee-toolbar {
+        gap: 0.5rem;
+    }
+
+    .employee-toolbar-title {
+        font-size: 1.05rem;
+    }
 }
 </style>
 
 <!-- ========================================
     Employee Management Toolbar
     ======================================== -->
-<div class="d-flex justify-content-between align-items-center mb-4 employee-actions-sticky">
-    <h4 class="mb-0">Manage Employees</h4>
-    <div>
-        <button class="btn btn-primary me-2" data-bs-toggle="modal" data-bs-target="#employeeModal" onclick="resetForm()">
+<div class="employee-actions-sticky mb-4">
+    <div class="employee-toolbar">
+    <h4 class="employee-toolbar-title">Manage Employees</h4>
+    <div class="employee-toolbar-actions">
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#employeeModal" onclick="resetForm()">
             <i class="bi bi-plus-lg me-2"></i>Add Employee
         </button>
-        <button type="button" class="btn btn-info me-2" data-bs-toggle="modal" data-bs-target="#attendanceModal" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('attendanceModal')).show(); return false;">
+        <button type="button" class="btn btn-info" data-bs-toggle="modal" data-bs-target="#attendanceModal" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('attendanceModal')).show(); return false;">
             <i class="bi bi-calendar-check me-2"></i>Mark Attendance
         </button>
-        <button type="button" class="btn btn-outline-secondary me-2" data-bs-toggle="modal" data-bs-target="#salaryModal" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('salaryModal')).show(); return false;">
+        <button type="button" class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#salaryModal" onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('salaryModal')).show(); return false;">
             <i class="bi bi-currency-dollar me-2"></i>View Employee Salary
         </button>
-        <button class="btn btn-secondary me-2" data-bs-toggle="modal" data-bs-target="#viewDetailsModal">
+        <button class="btn btn-secondary" data-bs-toggle="modal" data-bs-target="#viewDetailsModal">
             <i class="bi bi-eye me-2"></i>View Employee Details
         </button>
         <button class="btn btn-warning" data-bs-toggle="modal" data-bs-target="#pastEmployeesModal">
             <i class="bi bi-archive me-2"></i>View Past Employees
         </button>
+    </div>
     </div>
 </div>
 
@@ -1203,13 +1897,14 @@ if ($editEmployeeId) {
                         <th>Type</th>
                         <th>Phone Number</th>
                         <th>Daily Wage / Monthly Salary</th>
+                        <th>Current Salary</th>
                         <th class="text-center">Action</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if (empty($employees)): ?>
                     <tr>
-                        <td colspan="7" class="text-center text-muted py-4">No employees found. <a href="#" onclick="document.querySelector('[data-bs-target=\"#employeeModal\"]').click()">Add one now</a></td>
+                        <td colspan="8" class="text-center text-muted py-4">No employees found. <a href="#" onclick="document.querySelector('[data-bs-target=\"#employeeModal\"]').click()">Add one now</a></td>
                     </tr>
                     <?php else: ?>
                         <?php foreach ($employees as $employee): ?>
@@ -1266,6 +1961,17 @@ if ($editEmployeeId) {
                                     LKR <?= $displayAmount ?> <?= $displaySuffix ?>
                                 </div>
                             </td>
+                            <td>
+                                <?php
+                                    $currentSalaryDisplay = (float)($employee['current_salary'] ?? 0);
+                                    if ($currentSalaryDisplay <= 0) {
+                                        $currentSalaryDisplay = ($typeKey === 'daily_paid')
+                                            ? (float)($employee['daily_wage'] ?? 0)
+                                            : (float)($employee['monthly_salary'] ?? 0);
+                                    }
+                                ?>
+                                <strong>LKR <?= number_format($currentSalaryDisplay, 2) ?></strong>
+                            </td>
                             <td class="text-center text-nowrap">
                                 <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#employeeModal" onclick="editEmployee(<?= $employee['id'] ?>)">
                                     <i class="bi bi-pencil-square"></i>
@@ -1282,6 +1988,83 @@ if ($editEmployeeId) {
         </div>
         <div class="text-end mt-4">
             <button class="btn btn-primary" onclick="downloadEmployeeManagementSummary()"><i class="bi bi-download me-2"></i>Download Report</button>
+        </div>
+    </div>
+</div>
+
+<div class="card mt-4">
+    <div class="card-body">
+        <h5 class="mb-3 text-primary">Yearly Performance Bonus System</h5>
+
+        <div class="row g-3 align-items-end mb-3">
+            <div class="col-md-3">
+                <label for="performanceMonth" class="form-label">Month</label>
+                <select id="performanceMonth" class="form-select">
+                    <option value="1">January</option>
+                    <option value="2">February</option>
+                    <option value="3">March</option>
+                    <option value="4">April</option>
+                    <option value="5">May</option>
+                    <option value="6">June</option>
+                    <option value="7">July</option>
+                    <option value="8">August</option>
+                    <option value="9">September</option>
+                    <option value="10">October</option>
+                    <option value="11">November</option>
+                    <option value="12">December</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label for="performanceYear" class="form-label">Year</label>
+                <input type="number" id="performanceYear" class="form-control" min="2000" max="2100" value="<?= date('Y') ?>">
+            </div>
+            <div class="col-md-3">
+                <button type="button" class="btn btn-outline-primary w-100" onclick="saveMonthlyPerformance()">Save Monthly Performance</button>
+            </div>
+            <div class="col-md-3">
+                <button type="button" class="btn btn-primary w-100" onclick="calculateYearlyPerformance()">Calculate Yearly Performance</button>
+            </div>
+        </div>
+
+        <div class="table-responsive mb-4" style="max-height: 320px; overflow-y: auto;">
+            <table class="table table-sm table-hover align-middle" id="monthlyPerformanceTable">
+                <thead class="table-light sticky-top">
+                    <tr>
+                        <th>Employee ID</th>
+                        <th>Employee Name</th>
+                        <th>Monthly Stars (0-5)</th>
+                    </tr>
+                </thead>
+                <tbody id="monthlyPerformanceBody">
+                    <tr>
+                        <td colspan="3" class="text-center text-muted">Select month and year to assign stars</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="d-flex justify-content-end mb-3">
+            <button type="button" class="btn btn-success" onclick="approveYearlyIncrement()">Approve Increment</button>
+        </div>
+
+        <div class="table-responsive" style="max-height: 360px; overflow-y: auto;">
+            <table class="table table-striped align-middle" id="yearlyPerformanceTable">
+                <thead class="table-light sticky-top">
+                    <tr>
+                        <th>Employee ID</th>
+                        <th>Employee Name</th>
+                        <th>Total Stars</th>
+                        <th>Eligibility</th>
+                        <th>Top Performer</th>
+                        <th>Increment Approved</th>
+                    </tr>
+                </thead>
+                <tbody id="yearlyPerformanceBody">
+                    <tr>
+                        <td colspan="6" class="text-center text-muted">Yearly performance data will appear here</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
     </div>
 </div>
@@ -1350,13 +2133,13 @@ if ($editEmployeeId) {
 </div>
 
 <!-- ========================================
-    Attendance & Report Modal
+    Attendance Modal
     ======================================== -->
 <div class="modal fade" id="attendanceModal" tabindex="-1">
     <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Mark Attendance & Generate Reports</h5>
+                <h5 class="modal-title">Mark Attendance</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
@@ -1437,49 +2220,50 @@ if ($editEmployeeId) {
                     </table>
                 </div>
 
-                <!-- Report Generation Section -->
                 <div class="mt-4 border-top pt-3">
-                    <h6 class="mb-3">Generate Monthly Report</h6>
-                    <div class="row mb-3">
+                    <h6 class="mb-3">Attendance Summary</h6>
+                    <div class="row g-3 mb-3">
                         <div class="col-md-4">
-                            <label for="reportMonth" class="form-label">Select Month</label>
-                            <input type="month" class="form-control" id="reportMonth" value="<?= date('Y-m') ?>">
+                            <label for="attendanceSummaryMonth" class="form-label">Month</label>
+                            <select class="form-select" id="attendanceSummaryMonth">
+                                <option value="1">January</option>
+                                <option value="2">February</option>
+                                <option value="3">March</option>
+                                <option value="4">April</option>
+                                <option value="5">May</option>
+                                <option value="6">June</option>
+                                <option value="7">July</option>
+                                <option value="8">August</option>
+                                <option value="9">September</option>
+                                <option value="10">October</option>
+                                <option value="11">November</option>
+                                <option value="12">December</option>
+                            </select>
                         </div>
                         <div class="col-md-4">
-                            <label for="reportSearch" class="form-label">Search Report</label>
-                            <input type="text" class="form-control" id="reportSearch" placeholder="Search by name or UID...">
-                        </div>
-                        <div class="col-md-4 d-flex align-items-end">
-                            <button type="button" class="btn btn-success me-2" onclick="generateReport()">Generate Report</button>
-                            <button type="button" class="btn btn-outline-primary me-2" onclick="exportReport('csv')">Download CSV</button>
-                            <button type="button" class="btn btn-outline-secondary" onclick="exportReport('pdf')">Download PDF</button>
+                            <label for="attendanceSummaryYear" class="form-label">Year</label>
+                            <input type="number" class="form-control" id="attendanceSummaryYear" min="2000" max="2100" value="<?= date('Y') ?>">
                         </div>
                     </div>
 
-                    <!-- Report Results -->
-                    <div id="reportContainer" style="display: none;">
-                        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
-                            <table class="table table-sm table-striped align-middle" id="reportTable">
-                                <thead class="table-dark">
-                                    <tr>
-                                        <th>UID</th>
-                                        <th>Name</th>
-                                        <th>Type</th>
-                                        <th>Salary/Rate</th>
-                                        <th>Base Salary</th>
-                                        <th>Bonus</th>
-                                        <th>Present Days</th>
-                                        <th>Total Working Days</th>
-                                        <th>Final Salary</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="reportBody">
-                                    <!-- Report data will be populated here -->
-                                </tbody>
-                            </table>
-                        </div>
+                    <div class="table-responsive" style="max-height: 280px; overflow-y: auto;">
+                        <table class="table table-sm table-striped align-middle" id="attendanceSummaryTable">
+                            <thead class="table-light sticky-top">
+                                <tr>
+                                    <th>Employee ID</th>
+                                    <th>Employee Name</th>
+                                    <th>Total Present Days</th>
+                                </tr>
+                            </thead>
+                            <tbody id="attendanceSummaryBody">
+                                <tr>
+                                    <td colspan="3" class="text-center text-muted">Select month and year to view attendance summary</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
+
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
@@ -1789,6 +2573,237 @@ let deleteEmployeeId = null;
 let employeeData = <?= json_encode($employees) ?>;
 let allEmployeeData = <?= json_encode($allEmployees) ?>;
 let salaryDataCache = [];
+let selectedUID = '';
+let monthlyPerformanceCache = [];
+let yearlyPerformanceCache = [];
+
+// ========================================
+// Yearly Performance Workflow
+// ========================================
+function loadMonthlyPerformanceInput() {
+    const month = parseInt(document.getElementById('performanceMonth').value || '0', 10);
+    const year = parseInt(document.getElementById('performanceYear').value || '0', 10);
+    const tbody = document.getElementById('monthlyPerformanceBody');
+
+    if (!month || month < 1 || month > 12 || !year || year < 2000 || year > 2100) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">Please select a valid month and year</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Loading monthly performance...</td></tr>';
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'load_monthly_performance',
+            month: month,
+            year: year
+        })
+    })
+    .then(readJsonResponseSafely)
+    .then(data => {
+        if (!data.success) {
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">' + (data.message || 'Failed to load monthly performance') + '</td></tr>';
+            return;
+        }
+
+        monthlyPerformanceCache = Array.isArray(data.employees) ? data.employees : [];
+        if (monthlyPerformanceCache.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">No active employees found</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = monthlyPerformanceCache.map(emp => {
+            const selectedStars = Number(emp.stars || 0);
+            const options = [0, 1, 2, 3, 4, 5].map(star => `<option value="${star}" ${selectedStars === star ? 'selected' : ''}>${star} Star${star === 1 ? '' : 's'}</option>`).join('');
+
+            return `
+                <tr>
+                    <td><strong>${emp.uid || emp.employee_id}</strong></td>
+                    <td>${emp.name || 'N/A'}</td>
+                    <td>
+                        <select class="form-select form-select-sm monthly-stars-select" data-employee-id="${emp.employee_id}">
+                            ${options}
+                        </select>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    })
+    .catch(error => {
+        console.error('Error loading monthly performance:', error);
+        tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">Error loading monthly performance</td></tr>';
+    });
+}
+
+function saveMonthlyPerformance() {
+    const month = parseInt(document.getElementById('performanceMonth').value || '0', 10);
+    const year = parseInt(document.getElementById('performanceYear').value || '0', 10);
+
+    if (!month || month < 1 || month > 12 || !year || year < 2000 || year > 2100) {
+        alert('Please select a valid month and year');
+        return;
+    }
+
+    const ratings = Array.from(document.querySelectorAll('.monthly-stars-select')).map(selectEl => ({
+        employee_id: parseInt(selectEl.dataset.employeeId || '0', 10),
+        stars: parseInt(selectEl.value || '0', 10)
+    }));
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'save_monthly_performance',
+            month: month,
+            year: year,
+            ratings: ratings
+        })
+    })
+    .then(readJsonResponseSafely)
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'Failed to save monthly performance');
+            return;
+        }
+
+        alert(data.message || 'Monthly performance saved successfully');
+        loadYearlyPerformanceSummary();
+    })
+    .catch(error => {
+        console.error('Error saving monthly performance:', error);
+        alert('Error saving monthly performance');
+    });
+}
+
+function calculateYearlyPerformance() {
+    const year = parseInt(document.getElementById('performanceYear').value || '0', 10);
+    if (!year || year < 2000 || year > 2100) {
+        alert('Please select a valid year');
+        return;
+    }
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'calculate_yearly_performance',
+            year: year
+        })
+    })
+    .then(readJsonResponseSafely)
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'Failed to calculate yearly performance');
+            return;
+        }
+
+        alert(data.message || 'Yearly performance calculated successfully');
+        loadYearlyPerformanceSummary();
+    })
+    .catch(error => {
+        console.error('Error calculating yearly performance:', error);
+        alert('Error calculating yearly performance');
+    });
+}
+
+function loadYearlyPerformanceSummary() {
+    const year = parseInt(document.getElementById('performanceYear').value || '0', 10);
+    const tbody = document.getElementById('yearlyPerformanceBody');
+
+    if (!year || year < 2000 || year > 2100) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">Please select a valid year</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Loading yearly performance...</td></tr>';
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'load_yearly_performance',
+            year: year
+        })
+    })
+    .then(readJsonResponseSafely)
+    .then(data => {
+        if (!data.success) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">' + (data.message || 'Failed to load yearly performance') + '</td></tr>';
+            return;
+        }
+
+        yearlyPerformanceCache = Array.isArray(data.summary) ? data.summary : [];
+        if (yearlyPerformanceCache.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No yearly performance data available</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = yearlyPerformanceCache.map(row => {
+            const isEligible = Number(row.is_eligible || 0) === 1;
+            const isTop = Number(row.is_top_performer || 0) === 1;
+            const approved = Number(row.increment_approved || 0) === 1;
+
+            return `
+                <tr class="${isTop ? 'table-success' : ''}">
+                    <td><strong>${row.uid || row.employee_id || 'N/A'}</strong></td>
+                    <td>${row.name || 'N/A'}</td>
+                    <td>${row.total_stars || 0}</td>
+                    <td><span class="badge ${isEligible ? 'bg-success' : 'bg-secondary'}">${isEligible ? 'Eligible' : 'Not Eligible'}</span></td>
+                    <td>${isTop ? '<span class="badge bg-warning text-dark">Top Performer</span>' : '-'}</td>
+                    <td><span class="badge ${approved ? 'bg-success' : 'bg-secondary'}">${approved ? 'Approved' : 'Pending'}</span></td>
+                </tr>
+            `;
+        }).join('');
+    })
+    .catch(error => {
+        console.error('Error loading yearly performance:', error);
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">Error loading yearly performance</td></tr>';
+    });
+}
+
+function approveYearlyIncrement() {
+    const year = parseInt(document.getElementById('performanceYear').value || '0', 10);
+    if (!year || year < 2000 || year > 2100) {
+        alert('Please select a valid year');
+        return;
+    }
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'approve_yearly_increment',
+            year: year
+        })
+    })
+    .then(readJsonResponseSafely)
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'Failed to approve increment');
+            return;
+        }
+
+        alert(data.message || 'Increment approved successfully');
+        loadYearlyPerformanceSummary();
+        window.location.reload();
+    })
+    .catch(error => {
+        console.error('Error approving yearly increment:', error);
+        alert('Error approving increment');
+    });
+}
 
 // ========================================
 // Bonus Workflow
@@ -2184,6 +3199,7 @@ function resetForm() {
     document.getElementById('formAction').value = 'add';
     document.getElementById('employeeId').value = '';
     document.getElementById('uid').value = '';
+    selectedUID = '';
     document.getElementById('employeeModalTitle').textContent = 'Add Employee';
     document.getElementById('submitBtn').textContent = 'Add Employee';
     document.getElementById('employee_type').value = 'daily_paid';
@@ -2197,6 +3213,7 @@ function editEmployee(id) {
     document.getElementById('formAction').value = 'edit';
     document.getElementById('employeeId').value = employee.id;
     document.getElementById('uid').value = employee.uid || '';
+    selectedUID = employee.uid || '';
     document.getElementById('uid').setAttribute('readonly', 'readonly');
     document.getElementById('name').value = employee.name || '';
     document.getElementById('address').value = employee.address || '';
@@ -2268,6 +3285,85 @@ function updateWageFields() {
         monthlyInput.required = true;
     }
 }
+
+function handleUpdateEmployeeClick(event) {
+    const action = document.getElementById('formAction').value;
+    if (action !== 'edit') {
+        return;
+    }
+
+    event.preventDefault();
+
+    const uid = (selectedUID || document.getElementById('uid').value || '').trim();
+    const name = (document.getElementById('name').value || '').trim();
+    const phone = (document.getElementById('phone').value || '').trim();
+    const address = (document.getElementById('address').value || '').trim();
+    const employeeType = document.getElementById('employee_type').value;
+    const dailyWage = parseFloat(document.getElementById('daily_wage').value || '0');
+    const monthlySalary = parseFloat(document.getElementById('monthly_salary').value || '0');
+
+    if (!uid || !name || !phone || !address || !['daily_paid', 'monthly_paid'].includes(employeeType)) {
+        alert('Please fill all required fields');
+        return;
+    }
+
+    if (!/^\d{10}$/.test(phone)) {
+        alert('Phone Number is required and must be exactly 10 digits.');
+        return;
+    }
+
+    if (employeeType === 'daily_paid' && (!Number.isFinite(dailyWage) || dailyWage <= 0)) {
+        alert('Please provide a valid Daily Rate / Amount.');
+        return;
+    }
+
+    if (employeeType === 'monthly_paid' && (!Number.isFinite(monthlySalary) || monthlySalary <= 0)) {
+        alert('Please provide a valid Monthly Salary.');
+        return;
+    }
+
+    // Debug: print UID before executing query
+    console.log('Edit Employee UID before query:', uid);
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'update_employee_by_uid',
+            selected_uid: uid,
+            name: name,
+            phone: phone,
+            address: address,
+            employee_type: employeeType,
+            daily_wage: employeeType === 'daily_paid' ? dailyWage : 0,
+            monthly_salary: employeeType === 'monthly_paid' ? monthlySalary : 0
+        })
+    })
+    .then(readJsonResponseSafely)
+    .then(data => {
+        if (!data.success) {
+            alert(data.message || 'Failed to update employee');
+            return;
+        }
+
+        // Debug: print success message after update
+        console.log('Employee update success:', data.message || 'Employee updated successfully');
+
+        const employeeModal = document.getElementById('employeeModal');
+        const modalInstance = bootstrap.Modal.getOrCreateInstance(employeeModal);
+        modalInstance.hide();
+
+        window.location.reload();
+    })
+    .catch(error => {
+        console.error('Error updating employee:', error);
+        alert('Error updating employee');
+    });
+}
+
+document.getElementById('submitBtn').addEventListener('click', handleUpdateEmployeeClick);
 
 function loadEmployeeDetails() {
     const selectedId = document.getElementById('selectedEmployee').value;
@@ -2437,18 +3533,66 @@ function loadAttendanceForDate(date) {
     });
 }
 
-// Search functionality for report
-document.getElementById('reportSearch').addEventListener('input', function() {
-    const query = this.value.toLowerCase().trim();
-    const rows = document.querySelectorAll('#reportBody tr[data-employee-id]');
-    
-    rows.forEach(row => {
-        const name = row.dataset.name || '';
-        const uid = row.dataset.uid || '';
-        const visible = name.includes(query) || uid.includes(query);
-        row.style.display = visible ? '' : 'none';
+function loadAttendanceSummary() {
+    const month = parseInt(document.getElementById('attendanceSummaryMonth').value, 10);
+    const year = parseInt(document.getElementById('attendanceSummaryYear').value, 10);
+    const tbody = document.getElementById('attendanceSummaryBody');
+
+    if (!month || month < 1 || month > 12 || !year || year < 2000 || year > 2100) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">Please select a valid month and year</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Loading attendance summary...</td></tr>';
+
+    fetch('?page=employees', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            action: 'load_attendance_summary',
+            month: month,
+            year: year
+        })
+    })
+    .then(readJsonResponseSafely)
+    .then(data => {
+        if (!data.success) {
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">' + (data.message || 'Failed to load attendance summary') + '</td></tr>';
+            return;
+        }
+
+        const rows = Array.isArray(data.summary) ? data.summary : [];
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">No present attendance records found for selected month/year</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = rows.map(row => {
+            const employeeId = row.employee_id ?? 'N/A';
+            const employeeName = row.employee_name ?? 'N/A';
+            const totalPresentDays = row.total_present_days ?? 0;
+            return `
+                <tr>
+                    <td><strong>${employeeId}</strong></td>
+                    <td>${employeeName}</td>
+                    <td>${totalPresentDays}</td>
+                </tr>
+            `;
+        }).join('');
+    })
+    .catch(error => {
+        console.error('Error loading attendance summary:', error);
+        tbody.innerHTML = '<tr><td colspan="3" class="text-center text-danger">Error loading attendance summary</td></tr>';
     });
-});
+}
+
+document.getElementById('attendanceSummaryMonth').value = String(new Date().getMonth() + 1);
+
+document.getElementById('attendanceSummaryMonth').addEventListener('change', loadAttendanceSummary);
+document.getElementById('attendanceSummaryYear').addEventListener('change', loadAttendanceSummary);
+document.getElementById('attendanceModal').addEventListener('shown.bs.modal', loadAttendanceSummary);
 
 document.getElementById('salarySearch').addEventListener('input', function() {
     renderSalaryTable();
@@ -2463,43 +3607,6 @@ document.getElementById('salaryMonth').addEventListener('change', function() {
 document.getElementById('salaryModal').addEventListener('shown.bs.modal', function() {
     loadSalaryData();
 });
-
-// Generate monthly report
-function generateReport() {
-    const month = document.getElementById('reportMonth').value;
-    if (!month) {
-        alert('Please select a month');
-        return;
-    }
-
-    // Show loading
-    document.getElementById('reportContainer').style.display = 'block';
-    document.getElementById('reportBody').innerHTML = '<tr><td colspan="9" class="text-center">Generating report...</td></tr>';
-
-    // Fetch report data
-    fetch('?page=employees', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        },
-        body: new URLSearchParams({
-            action: 'generate_report',
-            month: month
-        }).toString()
-    })
-    .then(readJsonResponseSafely)
-    .then(data => {
-        if (data.success) {
-            displayReport(data.report);
-        } else {
-            document.getElementById('reportBody').innerHTML = '<tr><td colspan="9" class="text-center text-danger">Error generating report: ' + data.message + '</td></tr>';
-        }
-    })
-    .catch(error => {
-        console.error('Error:', error);
-        document.getElementById('reportBody').innerHTML = '<tr><td colspan="9" class="text-center text-danger">Error generating report</td></tr>';
-    });
-}
 
 function readJsonResponseSafely(response) {
     return response.text().then(text => {
@@ -2523,146 +3630,58 @@ function readJsonResponseSafely(response) {
     });
 }
 
-function displayReport(reportData) {
-    const tbody = document.getElementById('reportBody');
-    tbody.innerHTML = '';
-
-    if (reportData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No data found for selected month</td></tr>';
-        return;
-    }
-
-    reportData.forEach(employee => {
-        const row = document.createElement('tr');
-        row.setAttribute('data-employee-id', employee.id);
-        row.setAttribute('data-name', employee.name.toLowerCase());
-        row.setAttribute('data-uid', employee.uid.toLowerCase());
-        
-        row.innerHTML = `
-            <td><strong>${employee.uid}</strong></td>
-            <td>${employee.name}</td>
-            <td>
-                <span class="badge ${employee.type === 'daily_paid' ? 'bg-warning' : 'bg-info'}">
-                    ${employee.type === 'daily_paid' ? 'Daily Paid' : 'Monthly Paid'}
-                </span>
-            </td>
-            <td>${employee.salary_info}</td>
-            <td><strong>LKR ${parseFloat(employee.base_salary || 0).toFixed(2)}</strong></td>
-            <td><strong>LKR ${parseFloat(employee.bonus_amount || 0).toFixed(2)}</strong></td>
-            <td>${employee.present_days}</td>
-            <td>${employee.total_working_days}</td>
-            <td><strong>LKR ${parseFloat(employee.final_salary).toFixed(2)}</strong></td>
-        `;
-        
-        tbody.appendChild(row);
-    });
-}
-
-function exportReport(format = 'csv') {
-    const month = document.getElementById('reportMonth').value;
-    const searchQuery = document.getElementById('reportSearch').value.trim();
-    
-    if (!month) {
-        alert('Please select a month and generate report first');
-        return;
-    }
-
-    // Determine visible rows (filtered rows)
-    const visibleRows = Array.from(document.querySelectorAll('#reportBody tr[data-employee-id]')).filter(row => 
-        row.style.display !== 'none'
-    );
-
-    if (visibleRows.length === 0) {
-        alert('No data available to generate report');
-        return;
-    }
-
-    const isSingleEmployee = visibleRows.length === 1;
-    const filenameBase = isSingleEmployee ?
-        `employee_report_${month}_${searchQuery.replace(/[^a-zA-Z0-9]/g, '_')}` :
-        `monthly_report_${month}`;
-
-    if (format === 'csv') {
-        let csv = '';
-        if (isSingleEmployee) {
-            csv = 'Field,Value\n';
-            const cells = visibleRows[0].querySelectorAll('td');
-            const headers = ['UID', 'Name', 'Type', 'Salary/Rate', 'Base Salary', 'Bonus', 'Present Days', 'Total Working Days', 'Final Salary'];
-
-            headers.forEach((header, index) => {
-                const value = cells[index] ? cells[index].textContent.trim() : '';
-                csv += `"${header}","${value.replace(/"/g, '""')}"\n`;
-            });
-        } else {
-            csv = 'UID,Name,Type,Salary/Rate,Base Salary,Bonus,Present Days,Total Working Days,Final Salary\n';
-            visibleRows.forEach(row => {
-                const cells = row.querySelectorAll('td');
-                const data = Array.from(cells).map(cell => {
-                    return cell.textContent.replace(/,/g, ';').trim();
-                });
-                csv += data.map(field => `"${field.replace(/"/g, '""')}"`).join(',') + '\n';
-            });
-        }
-
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${filenameBase}.csv`;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-        return;
-    }
-
-    // PDF Export using jsPDF + autoTable
-    if (typeof window.jspdf === 'undefined' || typeof window.jspdf === 'undefined' && typeof window.jsPDF === 'undefined') {
-        alert('PDF export requires jsPDF library. Please ensure it is loaded.');
-        return;
-    }
-
-    const doc = new window.jspdf.jsPDF();
-    const title = isSingleEmployee ? 'Employee Attendance Report' : 'Monthly Attendance Report';
-    doc.setFontSize(14);
-    doc.text(title, 14, 20);
-
-    if (isSingleEmployee) {
-        const cells = visibleRows[0].querySelectorAll('td');
-        const headers = ['UID', 'Name', 'Type', 'Salary/Rate', 'Base Salary', 'Bonus', 'Present Days', 'Total Working Days', 'Final Salary'];
-        const data = headers.map((h, idx) => [h, cells[idx] ? cells[idx].textContent.trim() : '']);
-
-        doc.autoTable({
-            startY: 28,
-            theme: 'grid',
-            head: [['Field', 'Value']],
-            body: data,
-            styles: { fontSize: 10 }
-        });
-    } else {
-        const rows = visibleRows.map(row => {
-            const cells = row.querySelectorAll('td');
-            return Array.from(cells).map(cell => cell.textContent.trim());
-        });
-
-        doc.autoTable({
-            startY: 28,
-            theme: 'striped',
-            head: [['UID', 'Name', 'Type', 'Salary/Rate', 'Base Salary', 'Bonus', 'Present Days', 'Total Working Days', 'Final Salary']],
-            body: rows,
-            styles: { fontSize: 9 }
-        });
-    }
-
-    doc.save(`${filenameBase}.pdf`);
-}
-
 // ========================================
 // Full Management Summary PDF
 // ========================================
 function downloadEmployeeManagementSummary() {
     const month = document.getElementById('salaryMonth') ? document.getElementById('salaryMonth').value : new Date().toISOString().slice(0, 7);
+
+    const normalizeEmployeeType = (rawType, monthlySalary, dailyWage) => {
+        const type = String(rawType || '').toLowerCase().trim();
+        if (type.includes('month')) {
+            return 'monthly_paid';
+        }
+        if (type.includes('day')) {
+            return 'daily_paid';
+        }
+        if (Number(monthlySalary || 0) > 0) {
+            return 'monthly_paid';
+        }
+        return 'daily_paid';
+    };
+
+    const resolveDisplayedSalary = (row, preferredType = null) => {
+        const resolvedType = preferredType || normalizeEmployeeType(row.employee_type, row.monthly_salary, row.daily_wage);
+
+        const currentSalary = Number(row.current_salary || 0);
+        const monthlySalary = Number(row.monthly_salary || 0);
+        const dailyWage = Number(row.daily_wage || 0);
+        const baseSalary = Number(row.base_salary || 0);
+        const finalSalary = Number(row.final_salary || 0);
+
+        if (currentSalary > 0) {
+            return currentSalary;
+        }
+        if (resolvedType === 'monthly_paid' && monthlySalary > 0) {
+            return monthlySalary;
+        }
+        if (resolvedType === 'daily_paid' && dailyWage > 0) {
+            return dailyWage;
+        }
+        if (monthlySalary > 0) {
+            return monthlySalary;
+        }
+        if (dailyWage > 0) {
+            return dailyWage;
+        }
+        if (baseSalary > 0) {
+            return baseSalary;
+        }
+        if (finalSalary > 0) {
+            return finalSalary;
+        }
+        return 0;
+    };
 
     const buildLocalSummaryData = () => {
         const sourceEmployees = Array.isArray(allEmployeeData) ? allEmployeeData : [];
@@ -2672,11 +3691,8 @@ function downloadEmployeeManagementSummary() {
         let localSalaryRows = Array.isArray(salaryDataCache) ? [...salaryDataCache] : [];
         if (localSalaryRows.length === 0) {
             localSalaryRows = activeEmployees.map(emp => {
-                const typeRaw = String(emp.employee_type || '').toLowerCase();
-                const type = typeRaw.includes('month') ? 'monthly_paid' : 'daily_paid';
-                const base = type === 'monthly_paid'
-                    ? parseFloat(emp.monthly_salary || 0)
-                    : parseFloat(emp.daily_wage || 0);
+                const type = normalizeEmployeeType(emp.employee_type, emp.monthly_salary, emp.daily_wage);
+                const base = resolveDisplayedSalary(emp, type);
                 return {
                     uid: emp.uid || 'N/A',
                     name: emp.name || 'N/A',
@@ -2778,11 +3794,9 @@ function downloadEmployeeManagementSummary() {
         // Employee Details Section
         sectionTitle('Employee Details');
         const employeeDetailRows = activeEmployees.map(emp => {
-            const rawType = String(emp.employee_type || '').toLowerCase();
-            const salaryType = rawType.includes('month') ? 'Monthly' : 'Daily';
-            const baseSalary = rawType.includes('month')
-                ? parseFloat(emp.monthly_salary || 0)
-                : parseFloat(emp.daily_wage || 0);
+            const resolvedType = normalizeEmployeeType(emp.employee_type, emp.monthly_salary, emp.daily_wage);
+            const salaryType = resolvedType === 'monthly_paid' ? 'Monthly' : 'Daily';
+            const baseSalary = resolveDisplayedSalary(emp, resolvedType);
             return [
                 emp.uid || 'N/A',
                 emp.name || 'N/A',
@@ -2848,10 +3862,8 @@ function downloadEmployeeManagementSummary() {
         // New Joiners Section
         sectionTitle('New Joiners This Month');
         const newJoinerRows = newJoiners.map(emp => {
-            const rawType = String(emp.employee_type || '').toLowerCase();
-            const salary = rawType.includes('month')
-                ? parseFloat(emp.monthly_salary || 0)
-                : parseFloat(emp.daily_wage || 0);
+            const resolvedType = normalizeEmployeeType(emp.employee_type, emp.monthly_salary, emp.daily_wage);
+            const salary = resolveDisplayedSalary(emp, resolvedType);
             return [
                 emp.uid || 'N/A',
                 emp.name || 'N/A',
@@ -2876,10 +3888,8 @@ function downloadEmployeeManagementSummary() {
         // Left Employees Section
         sectionTitle('Employees Who Left This Month');
         const leftRows = leftEmployees.map(emp => {
-            const rawType = String(emp.employee_type || '').toLowerCase();
-            const salary = rawType.includes('month')
-                ? parseFloat(emp.monthly_salary || 0)
-                : parseFloat(emp.daily_wage || 0);
+            const resolvedType = normalizeEmployeeType(emp.employee_type, emp.monthly_salary, emp.daily_wage);
+            const salary = resolveDisplayedSalary(emp, resolvedType);
             return [
                 emp.uid || 'N/A',
                 emp.name || 'N/A',
@@ -2978,6 +3988,23 @@ function downloadEmployeeManagementSummary() {
         doc.save(`employee-management-summary-${data.month || month}.pdf`);
     });
 }
+
+if (document.getElementById('performanceMonth')) {
+    document.getElementById('performanceMonth').value = String(new Date().getMonth() + 1);
+    document.getElementById('performanceMonth').addEventListener('change', function() {
+        loadMonthlyPerformanceInput();
+    });
+}
+
+if (document.getElementById('performanceYear')) {
+    document.getElementById('performanceYear').addEventListener('change', function() {
+        loadMonthlyPerformanceInput();
+        loadYearlyPerformanceSummary();
+    });
+}
+
+loadMonthlyPerformanceInput();
+loadYearlyPerformanceSummary();
 
 document.getElementById('employeeForm').addEventListener('submit', function(e) {
     const name = (document.getElementById('name').value || '').trim();
